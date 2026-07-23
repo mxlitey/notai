@@ -257,13 +257,10 @@ export default function Home() {
                     onChange={() => toggleModel(model.id)}
                     className="mr-3"
                   />
-                  <div>
-                    <div className="font-medium">
+                  <div className="font-medium">
                       {model.name}
                       {model.isFree && <span className="ml-2 text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">免费</span>}
                     </div>
-                    <div className="text-xs text-gray-500">{model.supportsLogprobs ? '支持困惑度检测' : '基于特征分析'}</div>
-                  </div>
                 </label>
               ))}
             </div>
@@ -370,20 +367,51 @@ export default function Home() {
               </div>
             )}
 
-            {/* 段落级检测 */}
+            {/* 段落级检测 - 全文标注 */}
             {result.paragraphResults && result.paragraphResults.length > 0 && (
               <div className="mb-6">
-                <h3 className="font-semibold mb-3">段落级检测</h3>
-                <div className="space-y-2">
+                <h3 className="font-semibold mb-3">全文标注</h3>
+                <div className="text-sm mb-3 text-gray-500">
+                  <span className="inline-block mr-4">
+                    <span className="inline-block w-4 h-4 bg-red-200 border border-red-300 mr-1"></span>
+                    疑似AI生成
+                  </span>
+                  <span className="inline-block mr-4">
+                    <span className="inline-block w-4 h-4 bg-green-200 border border-green-300 mr-1"></span>
+                    可能人类写作
+                  </span>
+                  <span className="inline-block">
+                    <span className="inline-block w-4 h-4 bg-yellow-200 border border-yellow-300 mr-1"></span>
+                    不确定
+                  </span>
+                </div>
+                <div className="bg-white border border-gray-200 rounded-lg p-4 leading-relaxed">
+                  {result.paragraphResults.map((p: any, i: number) => {
+                    const bgColor = p.aiProbability > 70 
+                      ? 'bg-red-100 border-b-2 border-red-300' 
+                      : p.aiProbability > 40 
+                        ? 'bg-yellow-100 border-b-2 border-yellow-300' 
+                        : 'bg-green-100 border-b-2 border-green-300';
+                    return (
+                      <span
+                        key={i}
+                        className={`${bgColor} px-1 rounded cursor-pointer hover:opacity-80`}
+                        title={`AI概率: ${p.aiProbability}%`}
+                      >
+                        {p.paragraph}
+                      </span>
+                    );
+                  })}
+                </div>
+                <div className="mt-4 space-y-2">
+                  <h4 className="font-medium text-gray-700">分段详情</h4>
                   {result.paragraphResults.map((p: any, i: number) => (
-                    <div key={i} className={`p-3 rounded border ${p.isAI ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}>
+                    <div key={i} className={`p-2 rounded text-sm ${p.aiProbability > 70 ? 'bg-red-50 border-l-4 border-red-400' : p.aiProbability > 40 ? 'bg-yellow-50 border-l-4 border-yellow-400' : 'bg-green-50 border-l-4 border-green-400'}`}>
                       <div className="flex justify-between items-center mb-1">
-                        <span className="text-sm font-medium">段落 {i + 1}</span>
-                        <span className={`text-sm font-bold ${p.isAI ? 'text-red-600' : 'text-green-600'}`}>
-                          {p.aiProbability}% {p.isAI ? '(疑似AI)' : '(正常)'}
-                        </span>
+                        <span className="font-medium">片段 {i + 1}</span>
+                        <span className="font-bold">{p.aiProbability}% AI</span>
                       </div>
-                      <div className="text-sm text-gray-600">{p.paragraph}</div>
+                      <div className="text-gray-600">{p.paragraph.substring(0, 80)}{p.paragraph.length > 80 ? '...' : ''}</div>
                     </div>
                   ))}
                 </div>

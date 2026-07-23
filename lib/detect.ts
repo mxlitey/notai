@@ -76,42 +76,86 @@ async function callModel(text: string, modelId: string): Promise<{ perplexity: n
   }
 }
 
-// 段落级检测
+// 段落级检测（全文标注）
 export async function detectParagraphs(text: string, modelId: string = 'deepseek-v4-flash'): Promise<ParagraphResult[]> {
-  // 按段落分割
-  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length >= 30);
+  // 按多种方式分割：句子结束符、换行
+  const sentences = text
+    .replace(/([。！？.!?])/g, '$1|||')
+    .split('|||')
+    .map(s => s.trim())
+    .filter(s => s.length >= 5);
+  
+  if (sentences.length === 0) {
+    // 如果无法分割，直接返回整体
+    const { aiProbability } = await callModel(text, modelId);
+    return [{
+      paragraph: text,
+      startIndex: 0,
+      endIndex: text.length,
+      aiProbability,
+      isAI: aiProbability > 60
+    }];
+  }
+
+  // 每3-5个句子作为一个检测单元，滑动窗口
+  const chunkSize = 4;
+  const stepSize = 2; // 滑动步长，增加覆盖率
+  const chunks: { text: string; sentences: string[] }[] = [];
+  
+  for (let i = 0; i < sentences.length; i += stepSize) {
+    const endIdx = Math.min(i + chunkSize, sentences.length);
+    const chunkSentences = sentences.slice(i, endIdx);
+    
+    if (chunkSentences.length > 0) {
+      chunks.push({
+        text: chunkSentences.join(''),
+        sentences: chunkSentences
+      });
+    }
+    
+    // 如果到了最后，确保覆盖
+    if (i + stepSize >= sentences.length && endIdx < sentences.length) {
+      const remaining = sentences.slice(endIdx);
+      if (remaining.length > 0) {
+        chunks.push({
+          text: remaining.join(''),
+          sentences: remaining
+        });
+      }
+    }
+  }
 
   const results: ParagraphResult[] = [];
-  let currentIndex = 0;
 
-  for (const para of paragraphs) {
-    const startIndex = text.indexOf(para, currentIndex);
-    const endIndex = startIndex + para.length;
-    currentIndex = endIndex;
-
-    if (para.trim().length < 30) continue;
-
+  for (const chunk of chunks) {
+    if (chunk.text.trim().length < 15) continue;
+    
     try {
-      const { aiProbability } = await callModel(para, modelId);
+      const { aiProbability } = await callModel(chunk.text, modelId);
       results.push({
-        paragraph: para.substring(0, 100) + (para.length > 100 ? '...' : ''),
-        startIndex,
-        endIndex,
+        paragraph: chunk.text,
+        startIndex: 0,
+        endIndex: 0,
         aiProbability,
         isAI: aiProbability > 60
       });
     } catch {
       results.push({
-        paragraph: para.substring(0, 100) + (para.length > 100 ? '...' : ''),
-        startIndex,
-        endIndex,
+        paragraph: chunk.text,
+        startIndex: 0,
+        endIndex: 0,
         aiProbability: 50,
         isAI: false
       });
     }
   }
 
-  return results;
+  // 去重
+  const uniqueResults = results.filter((item, index, self) => 
+    index === self.findIndex(t => t.paragraph === item.paragraph)
+  );
+
+  return uniqueResults;
 }
 
 // AI来源识别
