@@ -1,0 +1,13 @@
+{
+  "name": "notai",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "env": {
+    "API_BASE_URL": "https://api.guyu.run",
+    "API_KEY": "@api_key",
+    "DETECT_MODEL": "deepseek-v4-flash",
+    "AUTH_SECRET": "@auth_secret",
+    "JWT_SECRET": "@jwt_secret"
+  }
+}
