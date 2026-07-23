@@ -38,7 +38,7 @@ async function callModel(text: string, modelId: string): Promise<{ perplexity: n
         logprobs: model.supportsLogprobs,
         max_tokens: 10  // 限制token数量，因为我们只需要概率或简单回复
       }),
-      signal: AbortSignal.timeout(30000) // 30秒超时
+      signal: AbortSignal.timeout(60000) // 60秒超时
     });
 
     if (!response.ok) {
@@ -83,7 +83,7 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
     .replace(/([。！？.!?])/g, '$1|||')
     .split('|||')
     .map(s => s.trim())
-    .filter(s => s.length >= 5);
+    .filter(s => s.length >= 10);
   
   if (sentences.length === 0) {
     // 如果无法分割，直接返回整体
@@ -97,65 +97,51 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
     }];
   }
 
-  // 每3-5个句子作为一个检测单元，滑动窗口
-  const chunkSize = 4;
-  const stepSize = 2; // 滑动步长，增加覆盖率
-  const chunks: { text: string; sentences: string[] }[] = [];
+  // 每5个句子作为一个检测单元
+  const chunkSize = 5;
+  const chunks: { text: string }[] = [];
   
-  for (let i = 0; i < sentences.length; i += stepSize) {
-    const endIdx = Math.min(i + chunkSize, sentences.length);
-    const chunkSentences = sentences.slice(i, endIdx);
-    
+  for (let i = 0; i < sentences.length; i += chunkSize) {
+    const chunkSentences = sentences.slice(i, i + chunkSize);
     if (chunkSentences.length > 0) {
       chunks.push({
-        text: chunkSentences.join(''),
-        sentences: chunkSentences
+        text: chunkSentences.join('')
       });
-    }
-    
-    // 如果到了最后，确保覆盖
-    if (i + stepSize >= sentences.length && endIdx < sentences.length) {
-      const remaining = sentences.slice(endIdx);
-      if (remaining.length > 0) {
-        chunks.push({
-          text: remaining.join(''),
-          sentences: remaining
-        });
-      }
     }
   }
 
-  const results: ParagraphResult[] = [];
+  // 限制最多10个片段，避免超时
+  const limitedChunks = chunks.slice(0, 10);
 
-  for (const chunk of chunks) {
-    if (chunk.text.trim().length < 15) continue;
+  // 并行调用API加速
+  const results: ParagraphResult[] = [];
+  const promises = limitedChunks.map(async (chunk) => {
+    if (chunk.text.trim().length < 20) return null;
     
     try {
       const { aiProbability } = await callModel(chunk.text, modelId);
-      results.push({
+      return {
         paragraph: chunk.text,
         startIndex: 0,
         endIndex: 0,
         aiProbability,
         isAI: aiProbability > 60
-      });
+      };
     } catch {
-      results.push({
+      return {
         paragraph: chunk.text,
         startIndex: 0,
         endIndex: 0,
         aiProbability: 50,
         isAI: false
-      });
+      };
     }
-  }
+  });
 
-  // 去重
-  const uniqueResults = results.filter((item, index, self) => 
-    index === self.findIndex(t => t.paragraph === item.paragraph)
-  );
-
-  return uniqueResults;
+  const resolvedResults = await Promise.all(promises);
+  
+  // 过滤掉null结果
+  return resolvedResults.filter((r): r is ParagraphResult => r !== null);
 }
 
 // AI来源识别

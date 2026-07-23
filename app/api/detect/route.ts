@@ -1,3 +1,5 @@
+export const maxDuration = 120; // API路由最大执行时间120秒
+
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyToken } from '@/lib/auth';
 import { detectAIContent } from '@/lib/detect';
