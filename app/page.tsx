@@ -6,7 +6,9 @@ export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [token, setToken] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [inputMode, setInputMode] = useState<'text' | 'url'>('text');
   const [text, setText] = useState('');
+  const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
@@ -44,11 +46,15 @@ export default function Home() {
     setError('');
     setResult(null);
 
+    const body = inputMode === 'url'
+      ? { url, token }
+      : { text, token };
+
     try {
       const res = await fetch('/api/detect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, token })
+        body: JSON.stringify(body)
       });
 
       const data = await res.json();
@@ -115,18 +121,66 @@ export default function Home() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            输入文本（50-5000字符）
-          </label>
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            className="w-full h-64 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-            placeholder="请粘贴要检测的文章内容..."
-          />
-          <div className="mt-2 text-right text-sm text-gray-500">
-            {text.length} / 5000
+          {/* 输入模式切换 */}
+          <div className="flex gap-2 mb-4">
+            <button
+              onClick={() => setInputMode('text')}
+              className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                inputMode === 'text'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              粘贴文本
+            </button>
+            <button
+              onClick={() => setInputMode('url')}
+              className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                inputMode === 'url'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              输入链接
+            </button>
           </div>
+
+          {/* 文本输入 */}
+          {inputMode === 'text' && (
+            <>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                输入文本（50-10000字符）
+              </label>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className="w-full h-64 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                placeholder="请粘贴要检测的文章内容..."
+              />
+              <div className="mt-2 text-right text-sm text-gray-500">
+                {text.length} / 10000
+              </div>
+            </>
+          )}
+
+          {/* URL输入 */}
+          {inputMode === 'url' && (
+            <>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                输入文章链接
+              </label>
+              <input
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="https://example.com/article"
+              />
+              <div className="mt-2 text-sm text-gray-500">
+                支持HTTP/HTTPS链接，将自动提取文章正文内容
+              </div>
+            </>
+          )}
         </div>
 
         {error && (
@@ -138,7 +192,7 @@ export default function Home() {
         <div className="flex justify-center mb-8">
           <button
             onClick={handleDetect}
-            disabled={loading || text.length < 50 || text.length > 5000}
+            disabled={loading || (inputMode === 'text' ? text.length < 50 : !url)}
             className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {loading ? '检测中...' : '开始检测'}
@@ -148,6 +202,13 @@ export default function Home() {
         {result && (
           <div className="bg-white rounded-2xl shadow-lg p-6">
             <h2 className="text-2xl font-bold mb-6">检测结果</h2>
+
+            {/* 来源信息 */}
+            {result.source === 'url' && (
+              <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
+                已从链接提取 {result.contentLength} 字符
+              </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
               <div className="bg-gray-50 p-4 rounded-lg text-center">
