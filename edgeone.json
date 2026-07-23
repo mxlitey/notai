@@ -8,6 +8,7 @@
     "API_BASE_URL": "@api_base_url",
     "API_KEY": "@api_key",
     "DETECT_MODEL": "@detect_model",
+    "PROMPT_MODEL": "@prompt_model",
     "AUTH_SECRET": "@auth_secret",
     "JWT_SECRET": "@jwt_secret",
     "PUBLIC_API_KEY": "@public_api_key"

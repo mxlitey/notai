@@ -1,15 +1,97 @@
 import { analyzeStatistics } from './statistics';
+import { analyzeTopology } from './topology';
 import { getModelConfig } from './models';
 import type { DetectionResult, ParagraphResult, ModelResult } from '@/types';
 
-// 纯统计特征检测，不依赖模型API
-// 检测指定文本的AI概率
+// API配置
+const API_BASE_URL = process.env.API_BASE_URL || 'https://api.guyu.run';
+const API_KEY = process.env.API_KEY || '';
+const PROMPT_MODEL = process.env.PROMPT_MODEL || 'deepseek-v4-flash';
+
+// 位段检测：本地统计特征 + 拓扑分析
 function detectText(text: string): { perplexity: number; aiProbability: number } {
   const stats = analyzeStatistics(text);
   return {
     perplexity: 0,
     aiProbability: stats.overallScore
   };
+}
+
+// 本地综合检测：统计特征 + 拓扑分析
+function detectLocal(text: string): { perplexity: number; aiProbability: number } {
+  const stats = analyzeStatistics(text);
+  const topo = analyzeTopology(text);
+  // 统计特征 40% + 拓扑分析 60%
+  const score = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
+  return {
+    perplexity: 0,
+    aiProbability: Math.max(10, Math.min(90, score))
+  };
+}
+
+// Prompt 模型判断 - 调用AI让模型判断文本是否AI生成
+async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Promise<{ aiProbability: number; reason: string }> {
+  if (!API_KEY) {
+    console.warn('[Prompt检测] API_KEY未配置，降级为本地检测');
+    const result = detectLocal(text);
+    return { aiProbability: result.aiProbability, reason: 'API未配置' };
+  }
+
+  // 文本截断（控制token消耗）
+  const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text;
+
+  const prompt = `你是AI检测专家。请分析以下中文文本是否由AI生成，只给出一个0到100的整数分数，分数越高越可能是AI生成。请严格基于以下特征判断：
+1. 是否过度使用"首先、其次、此外、综上所述"等AI常用词
+2. 句式是否过于规整、逻辑是否过于线性
+3. 是否缺少个人视角、主观表达和口语化表达
+4. 是否缺少情感波动、具体案例和个人经历
+5. 内容是否过于"正确"、缺乏跳跃性思维
+
+请只输出一个0到100的整数，不要输出其他任何内容。
+
+文本内容：
+${truncatedText}`;
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 10,
+        temperature: 0.1
+      }),
+      signal: AbortSignal.timeout(90000)  // 90秒超时
+    });
+
+    if (!response.ok) {
+      console.error(`[Prompt检测] API请求失败: ${response.status}`);
+      const result = detectLocal(text);
+      return { aiProbability: result.aiProbability, reason: 'API请求失败' };
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || '';
+    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 100)}`);
+
+    // 提取评分（只保留数字）
+    const scoreMatch = content.match(/\d+/);
+    if (!scoreMatch) {
+      const result = detectLocal(text);
+      return { aiProbability: result.aiProbability, reason: '无法解析评分' };
+    }
+
+    const score = Math.max(0, Math.min(100, parseInt(scoreMatch[0], 10)));
+    return { aiProbability: score, reason: '模型判断' };
+  } catch (error) {
+    console.error('[Prompt检测] 异常:', error);
+    const result = detectLocal(text);
+    return { aiProbability: result.aiProbability, reason: '调用异常' };
+  }
 }
 
 // 生成针对片段的修改建议
@@ -80,7 +162,7 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
   
   if (sentences.length === 0) {
     // 如果无法分割，直接返回整体
-    const { aiProbability } = detectText(text);
+    const { aiProbability } = detectLocal(text);
     const { suggestions, modifiedText } = generateParagraphSuggestions(text, aiProbability);
     return [{
       paragraph: text,
@@ -115,7 +197,7 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
     if (chunk.text.trim().length < 20) return null;
     
     try {
-      const { aiProbability } = detectText(chunk.text);
+      const { aiProbability } = detectLocal(chunk.text);
       const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, aiProbability);
       return {
         paragraph: chunk.text,
@@ -281,79 +363,75 @@ export async function detectAIContent(
   console.log('[检测] 开始检测, 模型:', models);
 
   try {
-    // 1. 多模型检测
+    // 1. 多模型循环（仅显示用，实际仍走本地检测）
     const modelResults: ModelResult[] = [];
     let totalPerplexity = 0;
     let totalAiProbability = 0;
     let validModels = 0;
 
     for (const modelId of models) {
-      try {
-        console.log(`[检测] 调用模型: ${modelId}`);
-        const result = detectText(text);
-        const modelConfig = getModelConfig(modelId);
-
-        modelResults.push({
-          modelId,
-          modelName: modelConfig?.name || modelId,
-          aiProbability: result.aiProbability,
-          perplexity: result.perplexity
-        });
-
-        totalPerplexity += result.perplexity;
-        totalAiProbability += result.aiProbability;
-        validModels++;
-        console.log(`[检测] 模型 ${modelId} 完成, AI概率: ${result.aiProbability}%`);
-      } catch (error) {
-        console.error(`[检测] 模型 ${modelId} 检测失败:`, error);
-        // 如果模型调用失败，使用统计特征作为备选
-        const stats = analyzeStatistics(text);
-        const modelConfig = getModelConfig(modelId);
-        modelResults.push({
-          modelId,
-          modelName: modelConfig?.name || modelId,
-          aiProbability: stats.overallScore,
-          perplexity: 0
-        });
-        totalAiProbability += stats.overallScore;
-        validModels++;
-      }
-    }
-
-    // 如果没有模型成功，使用统计特征
-    if (validModels === 0) {
-      console.log('[检测] 所有模型都失败，使用统计特征');
-      const stats = analyzeStatistics(text);
-      totalAiProbability = stats.overallScore;
-      validModels = 1;
+      const localResult = detectLocal(text);
+      const modelConfig = getModelConfig(modelId);
+      modelResults.push({
+        modelId,
+        modelName: modelConfig?.name || modelId,
+        aiProbability: localResult.aiProbability,
+        perplexity: localResult.perplexity
+      });
+      totalPerplexity += localResult.perplexity;
+      totalAiProbability += localResult.aiProbability;
+      validModels++;
     }
 
     const perplexity = totalPerplexity / validModels;
-    const modelAiProbability = totalAiProbability / validModels;
+    const localAiProbability = totalAiProbability / validModels;
 
-    // 2. 统计特征分析
+    // 2. 统计特征分析 + 拓扑分析
     const stats = analyzeStatistics(text);
+    const topo = analyzeTopology(text);
 
-    // 3. 综合评分
-    // 困惑度（模型回复概率）不可靠，降低权重到20%
-    // 统计特征更可靠，权重80%
-    const aiProbability = Math.round(modelAiProbability * 0.2 + stats.overallScore * 0.8);
+    // 3. 初步综合评分（本地特征）
+    // 统计特征 40% + 拓扑分析 60%
+    const localScore = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
+    const initialScore = Math.max(10, Math.min(90, localScore));
 
-    // 4. 置信度
+    // 4. 边界case触发Prompt模型判断
+    // 只有评分在 40-70% 之间的不确定区才调用API
+    let aiProbability = initialScore;
+    let promptScore: number | undefined;
+    let promptReason: string | undefined;
     let confidence: 'high' | 'medium' | 'low';
-    if (aiProbability > 80 || aiProbability < 20) {
-      confidence = 'high';
-    } else if (aiProbability > 60 || aiProbability < 40) {
+
+    if (initialScore >= 40 && initialScore <= 70) {
+      // 不确定区，调用Prompt模型判断
+      console.log('[检测] 进入边界区，调用模型深度判断...');
+      const promptModel = models[0] || PROMPT_MODEL;
+      const promptResult = await callModelPrompt(text, promptModel);
+      promptScore = promptResult.aiProbability;
+      promptReason = promptResult.reason;
+
+      // 综合评分：本地 60% + 模型 40%
+      aiProbability = Math.round(localScore * 0.6 + promptScore * 0.4);
       confidence = 'medium';
+      console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${promptScore} = 综合评分 ${aiProbability}% (${promptReason})`);
     } else {
-      confidence = 'low';
+      // 确定区，直接使用本地评分
+      aiProbability = initialScore;
+
+      if (aiProbability > 80 || aiProbability < 20) {
+        confidence = 'high';
+      } else if (aiProbability > 60 || aiProbability < 40) {
+        confidence = 'medium';
+      } else {
+        confidence = 'low';
+      }
     }
 
     // 5. 置信区间
     const confidenceInterval = calculateConfidenceInterval(aiProbability, validModels);
 
     // 6. 生成分析说明
-    const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults);
+    const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, promptScore);
 
     // 7. 段落级检测（可选）
     let paragraphResults: ParagraphResult[] | undefined;
@@ -408,7 +486,9 @@ function generateAnalysis(
   aiProbability: number,
   perplexity: number,
   stats: { sentenceLengthVariance: number; lexicalDiversity: number; punctuationScore: number; overallScore: number },
-  modelResults: ModelResult[]
+  modelResults: ModelResult[],
+  topo?: { informationDensity: number; logicalConnection: number; argumentDepth: number; paragraphLength: number; overallScore: number },
+  promptScore?: number
 ): string {
   const lines: string[] = [];
 
@@ -430,19 +510,24 @@ function generateAnalysis(
     });
   }
 
-  lines.push(`\n**困惑度分析**：${perplexity.toFixed(2)}`);
-  if (perplexity < 30) {
-    lines.push('困惑度较低，文本生成模式化，符合AI生成特征。');
-  } else if (perplexity < 50) {
-    lines.push('困惑度中等，文本有一定变化，检测结果不确定。');
-  } else {
-    lines.push('困惑度较高，文本富有变化，符合人类写作特征。');
+  // Prompt模型判断结果（如有）
+  if (promptScore !== undefined) {
+    lines.push(`\n**模型深度分析**：${promptScore}/100 AI概率（边界case触发模型判断）`);
   }
 
   lines.push(`\n**统计特征分析**：`);
   lines.push(`- 句长方差评分：${stats.sentenceLengthVariance}/100`);
   lines.push(`- 词汇多样性：${stats.lexicalDiversity}/100`);
   lines.push(`- 标点分布：${stats.punctuationScore}/100`);
+
+  // 拓扑特征分析
+  if (topo) {
+    lines.push(`\n**结构特征分析**：`);
+    lines.push(`- 信息密度分布：${topo.informationDensity}/100`);
+    lines.push(`- 逻辑连接强度：${topo.logicalConnection}/100`);
+    lines.push(`- 论证深度变化：${topo.argumentDepth}/100`);
+    lines.push(`- 段落长度分布：${topo.paragraphLength}/100`);
+  }
 
   return lines.join('\n');
 }
