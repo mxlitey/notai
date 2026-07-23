@@ -12,18 +12,26 @@ function parseModelsFromEnv(): ModelConfig[] {
   const models = modelStr.split(';').map(m => m.trim()).filter(Boolean);
 
   return models.map(modelId => {
-    // 显示名称：如果有 '/' 取右边，否则取整个
-    const displayName = modelId.includes('/') ? modelId.split('/').pop() || modelId : modelId;
+    // 判断是否免费：以 -free 结尾
+    const isFree = modelId.toLowerCase().endsWith('-free');
 
-    // 判断是否免费（根据特定标识）
-    const isFree = modelId.includes('free') || modelId.includes('qwen3');
+    // 显示名称处理
+    let displayName = modelId;
+    if (isFree) {
+      // 如果以 -free 结尾，去掉后缀
+      displayName = modelId.replace(/-free$/i, '');
+    }
+    // 如果有 '/' 取右边
+    if (displayName.includes('/')) {
+      displayName = displayName.split('/').pop() || displayName;
+    }
 
     // 判断是否支持logprobs（已知支持的模型）
     const supportsLogprobs = ['deepseek', 'glm'].some(m => modelId.toLowerCase().includes(m));
 
     return {
       id: modelId,
-      name: displayName || modelId,
+      name: displayName,
       isFree,
       supportsLogprobs
     };

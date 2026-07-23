@@ -18,61 +18,57 @@ async function callModel(text: string, modelId: string): Promise<{ perplexity: n
     throw new Error(`未知模型: ${modelId}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_KEY}`
-    },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [{ role: 'user', content: text }],
-      logprobs: model.supportsLogprobs
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`API请求失败: ${response.status}`);
+  // 检查API密钥
+  if (!API_KEY) {
+    throw new Error('API_KEY 未配置');
   }
 
-  const data = await response.json();
+  console.log(`[检测] 使用模型: ${modelId}, 支持logprobs: ${model.supportsLogprobs}`);
 
-  if (model.supportsLogprobs && data.choices?.[0]?.logprobs?.content) {
-    // 支持logprobs的模型
-    const logprobsContent: LogprobsContent[] = data.choices[0].logprobs.content;
-    const logprobs = logprobsContent.map((item: LogprobsContent) => item.logprob);
-    const perplexity = calculatePerplexity(logprobs);
-    const aiProbability = perplexityToAIScore(perplexity);
-    return { perplexity, aiProbability };
-  } else {
-    // 不支持logprobs的模型，使用Prompt判断
-    const content = data.choices?.[0]?.message?.content || '';
-    const aiProbability = extractAIScoreFromResponse(content);
-    return { perplexity: 0, aiProbability };
-  }
-}
+  try {
+    const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: text }],
+        logprobs: model.supportsLogprobs,
+        max_tokens: 10  // 限制token数量，因为我们只需要概率或简单回复
+      }),
+      signal: AbortSignal.timeout(30000) // 30秒超时
+    });
 
-// 从模型响应中提取AI概率
-function extractAIScoreFromResponse(content: string): number {
-  // 尝试匹配数字
-  const match = content.match(/(\d+)%/);
-  if (match) {
-    return parseInt(match[1]);
-  }
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[检测] API请求失败: ${response.status}`, errorText);
+      throw new Error(`API请求失败: ${response.status}`);
+    }
 
-  // 根据关键词判断
-  const lowerContent = content.toLowerCase();
-  if (lowerContent.includes('高度可能') || lowerContent.includes('很大可能')) {
-    return 85;
-  }
-  if (lowerContent.includes('可能') || lowerContent.includes('疑似')) {
-    return 65;
-  }
-  if (lowerContent.includes('不太可能') || lowerContent.includes('不太像')) {
-    return 25;
-  }
+    const data = await response.json();
+    console.log(`[检测] API响应:`, JSON.stringify(data).substring(0, 500));
 
-  return 50;
+    if (model.supportsLogprobs && data.choices?.[0]?.logprobs?.content) {
+      // 支持logprobs的模型
+      const logprobsContent: LogprobsContent[] = data.choices[0].logprobs.content;
+      const logprobs = logprobsContent.map((item: LogprobsContent) => item.logprob);
+      const perplexity = calculatePerplexity(logprobs);
+      const aiProbability = perplexityToAIScore(perplexity);
+      console.log(`[检测] 困惑度: ${perplexity}, AI概率: ${aiProbability}%`);
+      return { perplexity, aiProbability };
+    } else {
+      // 不支持logprobs的模型，使用统计特征分析
+      console.log(`[检测] 模型不支持logprobs，使用统计特征分析`);
+      const stats = analyzeStatistics(text);
+      const aiProbability = stats.overallScore;
+      return { perplexity: 0, aiProbability };
+    }
+  } catch (error) {
+    console.error(`[检测] 调用模型 ${modelId} 失败:`, error);
+    throw error;
+  }
 }
 
 // 段落级检测
@@ -222,6 +218,8 @@ export async function detectAIContent(
     enableSuggestions = false
   } = options;
 
+  console.log('[检测] 开始检测, 模型:', models);
+
   try {
     // 1. 多模型检测
     const modelResults: ModelResult[] = [];
@@ -231,6 +229,7 @@ export async function detectAIContent(
 
     for (const modelId of models) {
       try {
+        console.log(`[检测] 调用模型: ${modelId}`);
         const result = await callModel(text, modelId);
         const modelConfig = getModelConfig(modelId);
 
@@ -244,16 +243,28 @@ export async function detectAIContent(
         totalPerplexity += result.perplexity;
         totalAiProbability += result.aiProbability;
         validModels++;
+        console.log(`[检测] 模型 ${modelId} 完成, AI概率: ${result.aiProbability}%`);
       } catch (error) {
-        console.error(`模型 ${modelId} 检测失败:`, error);
+        console.error(`[检测] 模型 ${modelId} 检测失败:`, error);
+        // 如果模型调用失败，使用统计特征作为备选
+        const stats = analyzeStatistics(text);
+        const modelConfig = getModelConfig(modelId);
+        modelResults.push({
+          modelId,
+          modelName: modelConfig?.name || modelId,
+          aiProbability: stats.overallScore,
+          perplexity: 0
+        });
+        totalAiProbability += stats.overallScore;
+        validModels++;
       }
     }
 
-    // 如果没有模型成功，使用默认模型
+    // 如果没有模型成功，使用统计特征
     if (validModels === 0) {
-      const result = await callModel(text, 'deepseek-v4-flash');
-      totalPerplexity = result.perplexity;
-      totalAiProbability = result.aiProbability;
+      console.log('[检测] 所有模型都失败，使用统计特征');
+      const stats = analyzeStatistics(text);
+      totalAiProbability = stats.overallScore;
       validModels = 1;
     }
 
@@ -288,7 +299,7 @@ export async function detectAIContent(
       try {
         paragraphResults = await detectParagraphs(text, models[0] || 'deepseek-v4-flash');
       } catch (error) {
-        console.error('段落级检测失败:', error);
+        console.error('[检测] 段落级检测失败:', error);
       }
     }
 
@@ -303,6 +314,8 @@ export async function detectAIContent(
     if (enableSuggestions) {
       suggestions = generateSuggestions(stats, aiProbability);
     }
+
+    console.log(`[检测] 完成, AI概率: ${aiProbability}%`);
 
     return {
       aiProbability,
@@ -323,7 +336,7 @@ export async function detectAIContent(
       source: 'text'
     };
   } catch (error) {
-    console.error('检测失败:', error);
+    console.error('[检测] 检测失败:', error);
     throw error;
   }
 }
