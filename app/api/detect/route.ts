@@ -2,10 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyToken } from '@/lib/auth';
 import { detectAIContent } from '@/lib/detect';
 import { fetchArticleFromUrl, isValidUrl } from '@/lib/fetch';
+import { isValidModel } from '@/lib/models';
+import type { DetectRequest } from '@/types';
 
 export async function POST(request: NextRequest) {
   try {
-    const { text, url, token } = await request.json();
+    const body: DetectRequest = await request.json();
+    const { text, url, token, models, enableParagraphDetection, enableSourceIdentification, enableSuggestions } = body;
 
     // 验证token
     if (!token || !(await verifyToken(token))) {
@@ -53,12 +56,25 @@ export async function POST(request: NextRequest) {
     }
 
     if (content.length > 10000) {
-      // 截取前10000字符
       content = content.substring(0, 10000);
     }
 
+    // 验证模型ID
+    let selectedModels = ['deepseek-v4-flash'];
+    if (models && Array.isArray(models) && models.length > 0) {
+      const validModels = models.filter(m => isValidModel(m));
+      if (validModels.length > 0) {
+        selectedModels = validModels;
+      }
+    }
+
     // 执行检测
-    const result = await detectAIContent(content);
+    const result = await detectAIContent(content, {
+      models: selectedModels,
+      enableParagraphDetection: enableParagraphDetection === true,
+      enableSourceIdentification: enableSourceIdentification === true,
+      enableSuggestions: enableSuggestions === true
+    });
 
     return NextResponse.json({
       success: true,
