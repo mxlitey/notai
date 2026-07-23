@@ -1,97 +1,33 @@
-import { calculatePerplexity, perplexityToAIScore } from './perplexity';
 import { analyzeStatistics } from './statistics';
-import { AVAILABLE_MODELS, getModelConfig } from './models';
+import { getModelConfig } from './models';
 import type { DetectionResult, ParagraphResult, ModelResult } from '@/types';
 
-const API_BASE_URL = process.env.API_BASE_URL || 'https://api.guyu.run';
-const API_KEY = process.env.API_KEY || '';
-
-interface LogprobsContent {
-  token: string;
-  logprob: number;
-}
-
-// 调用API获取logprobs或使用模型判断
-async function callModel(text: string, modelId: string): Promise<{ perplexity: number; aiProbability: number }> {
-  const model = getModelConfig(modelId);
-  if (!model) {
-    throw new Error(`未知模型: ${modelId}`);
-  }
-
-  // 检查API密钥
-  if (!API_KEY) {
-    throw new Error('API_KEY 未配置');
-  }
-
-  console.log(`[检测] 使用模型: ${modelId}, 支持logprobs: ${model.supportsLogprobs}`);
-
-  try {
-    const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${API_KEY}`
-      },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: text }],
-        logprobs: model.supportsLogprobs,
-        max_tokens: 10  // 限制token数量，因为我们只需要概率或简单回复
-      }),
-      signal: AbortSignal.timeout(60000) // 60秒超时
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[检测] API请求失败: ${response.status}`, errorText);
-      throw new Error(`API请求失败: ${response.status}`);
-    }
-
-    const data = await response.json();
-    console.log(`[检测] API响应:`, JSON.stringify(data).substring(0, 500));
-
-    // 检查logprobs - 支持两种字段格式
-    // 1. content（标准格式，如 glm-5.2）
-    // 2. reasoning_content（非标准格式，如 deepseek-v4-flash）
-    const logprobsData = data.choices?.[0]?.logprobs;
-    const logprobsContent = logprobsData?.content || logprobsData?.reasoning_content;
-
-    if (model.supportsLogprobs && logprobsContent) {
-      // 支持logprobs的模型
-      const logprobsValues = logprobsContent.map((item: LogprobsContent) => item.logprob);
-      const perplexity = calculatePerplexity(logprobsValues);
-      const aiProbability = perplexityToAIScore(perplexity);
-      console.log(`[检测] 困惑度: ${perplexity}, AI概率: ${aiProbability}%`);
-      return { perplexity, aiProbability };
-    } else {
-      // 不支持logprobs的模型，使用统计特征分析
-      console.log(`[检测] 模型不支持logprobs或无返回数据，使用统计特征分析`);
-      const stats = analyzeStatistics(text);
-      const aiProbability = stats.overallScore;
-      return { perplexity: 0, aiProbability };
-    }
-  } catch (error) {
-    console.error(`[检测] 调用模型 ${modelId} 失败:`, error);
-    throw error;
-  }
+// 纯统计特征检测，不依赖模型API
+// 检测指定文本的AI概率
+function detectText(text: string): { perplexity: number; aiProbability: number } {
+  const stats = analyzeStatistics(text);
+  return {
+    perplexity: 0,
+    aiProbability: stats.overallScore
+  };
 }
 
 // 生成针对片段的修改建议
 function generateParagraphSuggestions(text: string, aiProbability: number): { suggestions: string[]; modifiedText?: string } {
   const suggestions: string[] = [];
   
-  if (aiProbability < 40) {
-    return { suggestions: ['该片段风格自然，无需修改。'] };
+  if (aiProbability < 50) {
+    return { suggestions: ['该片段风格自然，无明显AI特征。'] };
   }
 
   // 检测句式问题
   const sentences = text.split(/[。！？.!?]/).filter(s => s.trim());
   const sentenceLengths = sentences.map(s => s.length);
-  const avgLength = sentenceLengths.reduce((a, b) => a + b, 0) / sentenceLengths.length;
-  const variance = sentenceLengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / sentenceLengths.length;
+  const avgLength = sentenceLengths.reduce((a, b) => a + b, 0) / (sentenceLengths.length || 1);
+  const varLen = sentenceLengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / (sentenceLengths.length || 1);
 
   // 检测AI常用词
-  const aiWords = ['首先', '其次', '此外', '总之', '综上所述', '由此可见', '因此', '所以', '值得注意的是'];
+  const aiWords = ['首先', '其次', '此外', '总之', '综上所述', '由此可见', '因此', '值得注意的是', '需要指出的是'];
   const foundAiWords = aiWords.filter(word => text.includes(word));
 
   // 检测重复词汇
@@ -104,53 +40,33 @@ function generateParagraphSuggestions(text: string, aiProbability: number): { su
   });
   const repeatedWords = Object.entries(wordCount).filter(([_, count]) => count > 2).map(([word]) => word);
 
-  // 生成建议
-  if (variance < 20) {
-    suggestions.push('• 句子长度过于均匀，建议增加长短句变化');
+  // 生成针对性建议
+  if (aiProbability > 70) {
+    suggestions.push('该片段有较明显的AI特征，建议重写。');
+  } else {
+    suggestions.push('该片段有一些AI特征，建议优化。');
+  }
+  suggestions.push('');
+
+  if (varLen < avgLength * 0.1 && avgLength > 20) {
+    suggestions.push('【句式】句子长度过于均匀');
+    suggestions.push('  - 穿插短句，如"真的。""确实如此。"');
   }
 
   if (foundAiWords.length > 0) {
-    suggestions.push(`• 减少使用AI常用词：${foundAiWords.join('、')}`);
+    suggestions.push(`【用词】检测到AI常用词：${foundAiWords.join('、')}`);
+    suggestions.push('  - 用自己的话重新表达这些连接关系');
   }
 
   if (repeatedWords.length > 0) {
-    suggestions.push(`• 避免重复词汇：${repeatedWords.slice(0, 3).join('、')}`);
+    suggestions.push(`【词汇】重复用词：${repeatedWords.slice(0, 3).join('、')}`);
+    suggestions.push('  - 尝试同义词替换或省略');
   }
 
-  if (avgLength > 30) {
-    suggestions.push('• 适当拆分长句，增加节奏感');
-  }
+  suggestions.push('【内容】加入个人观点或具体例子');
 
-  suggestions.push('• 加入个人观点或具体例子');
-  suggestions.push('• 使用更口语化的表达');
-
-  // 生成修改后的示例（简单处理）
-  let modifiedText = text;
-  
-  // 替换AI常用词
-  const replacements: Record<string, string> = {
-    '首先': '一开始',
-    '其次': '然后',
-    '此外': '另外',
-    '总之': '总的来说',
-    '综上所述': '综合来看',
-    '由此可见': '可以看出',
-    '因此': '所以',
-    '所以': '于是',
-    '值得注意的是': '需要指出的是'
-  };
-
-  for (const [word, replacement] of Object.entries(replacements)) {
-    modifiedText = modifiedText.replace(new RegExp(word, 'g'), replacement);
-  }
-
-  // 添加一些口语化标记
-  if (aiProbability > 70 && sentences.length > 1) {
-    const randomIndex = Math.floor(Math.random() * sentences.length);
-    modifiedText = modifiedText.replace(sentences[randomIndex], `说实话，${sentences[randomIndex]}`);
-  }
-
-  return { suggestions, modifiedText: modifiedText !== text ? modifiedText : undefined };
+  // 不再生成机械的修改示例
+  return { suggestions };
 }
 
 // 段落级检测（全文标注）
@@ -164,7 +80,7 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
   
   if (sentences.length === 0) {
     // 如果无法分割，直接返回整体
-    const { aiProbability } = await callModel(text, modelId);
+    const { aiProbability } = detectText(text);
     const { suggestions, modifiedText } = generateParagraphSuggestions(text, aiProbability);
     return [{
       paragraph: text,
@@ -199,7 +115,7 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
     if (chunk.text.trim().length < 20) return null;
     
     try {
-      const { aiProbability } = await callModel(chunk.text, modelId);
+      const { aiProbability } = detectText(chunk.text);
       const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, aiProbability);
       return {
         paragraph: chunk.text,
@@ -297,33 +213,50 @@ export function generateSuggestions(statistics: { sentenceLengthVariance: number
   const suggestions: string[] = [];
 
   if (aiProbability < 50) {
-    suggestions.push('文本已具有人类写作特征，无需大幅修改。');
+    suggestions.push('文章整体风格自然，未检测到明显的AI生成特征。');
+    suggestions.push('继续保持个人写作风格，文章质量良好。');
     return suggestions;
   }
 
-  if (statistics.sentenceLengthVariance > 60) {
-    suggestions.push('✓ 句子长度变化自然，继续保持。');
+  if (aiProbability > 80) {
+    suggestions.push('文章有多项AI写作特征，建议大幅重写。');
+  } else if (aiProbability > 60) {
+    suggestions.push('文章存在一些AI写作特征，建议重点修改以下方面：');
   } else {
-    suggestions.push('• 增加句子长度变化，混合使用长短句，避免过于均匀。');
-    suggestions.push('• 适当加入一些短促有力的句子，增强节奏感。');
+    suggestions.push('文章存在少量AI写作特征，可参考以下建议优化：');
   }
 
-  if (statistics.lexicalDiversity > 50) {
-    suggestions.push('✓ 词汇使用较为丰富。');
-  } else {
-    suggestions.push('• 减少重复用词，尝试使用同义词替换。');
-    suggestions.push('• 加入一些口语化表达或个性化词汇。');
-    suggestions.push('• 避免过度使用"首先、其次、此外"等连接词。');
+  suggestions.push('');
+
+  // 句式建议
+  if (statistics.sentenceLengthVariance > 55) {
+    suggestions.push('【句式】句子长度过于规整，建议：');
+    suggestions.push('  - 穿插一些短句（5-10字），打破均匀节奏');
+    suggestions.push('  - 尝试倒装、反问等句式变化');
+    suggestions.push('  - 可以用"对。""嗯。""真的。"这类极短句');
   }
 
-  if (statistics.punctuationScore < 40) {
-    suggestions.push('• 适当使用感叹号、问号等表达情感。');
-    suggestions.push('• 可以加入一些引号强调重点内容。');
+  // 词汇建议
+  if (statistics.lexicalDiversity < 45) {
+    suggestions.push('【词汇】词汇重复较多，建议：');
+    suggestions.push('  - 用具体的描述替代抽象的表达（如"好"→"让人眼前一亮"）');
+    suggestions.push('  - 加入一些口语词，如"反正""倒是""怎么说呢"');
+    suggestions.push('  - 适当使用比喻、拟人等修辞手法');
   }
 
-  suggestions.push('• 加入个人观点、经历或例子，增加主观性。');
-  suggestions.push('• 使用一些非正式表达，如口语、俚语等。');
-  suggestions.push('• 避免过于完美的逻辑结构，适当加入一些"不完美"。');
+  // 标点建议
+  if (statistics.punctuationScore > 55) {
+    suggestions.push('【标点】标点使用过于规范，建议：');
+    suggestions.push('  - 可以用省略号（...）表示停顿或留白');
+    suggestions.push('  - 用破折号（——）做补充说明，更口语化');
+    suggestions.push('  - 不必每句都用句号，可以用逗号连接短句');
+  }
+
+  // 通用建议
+  suggestions.push('【内容】增加个人痕迹：');
+  suggestions.push('  - 加入自己的经历、感受或观点');
+  suggestions.push('  - 用"我觉得""说实话""讲真"等主观表达');
+  suggestions.push('  - 可以适当跑题、插入个人联想');
 
   return suggestions;
 }
@@ -357,7 +290,7 @@ export async function detectAIContent(
     for (const modelId of models) {
       try {
         console.log(`[检测] 调用模型: ${modelId}`);
-        const result = await callModel(text, modelId);
+        const result = detectText(text);
         const modelConfig = getModelConfig(modelId);
 
         modelResults.push({
@@ -402,7 +335,9 @@ export async function detectAIContent(
     const stats = analyzeStatistics(text);
 
     // 3. 综合评分
-    const aiProbability = Math.round(modelAiProbability * 0.7 + stats.overallScore * 0.3);
+    // 困惑度（模型回复概率）不可靠，降低权重到20%
+    // 统计特征更可靠，权重80%
+    const aiProbability = Math.round(modelAiProbability * 0.2 + stats.overallScore * 0.8);
 
     // 4. 置信度
     let confidence: 'high' | 'medium' | 'low';

@@ -428,13 +428,7 @@ export default function Home() {
                         </div>
                       )}
 
-                      {/* 修改后的文本 */}
-                      {p.modifiedText && (
-                        <div>
-                          <div className="text-xs text-gray-500 mb-1">修改示例：</div>
-                          <div className="p-2 bg-blue-50 border border-blue-200 rounded text-gray-700">{p.modifiedText}</div>
-                        </div>
-                      )}
+                      
                     </div>
                   ))}
                 </div>

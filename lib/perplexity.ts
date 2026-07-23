@@ -2,27 +2,25 @@
 export function calculatePerplexity(logprobs: number[]): number {
   if (logprobs.length === 0) return 0;
 
-  // 计算平均负对数概率
   const avgNegativeLogProb = logprobs.reduce((sum, lp) => sum + lp, 0) / logprobs.length;
-
-  // 困惑度 = exp(avg(-logprob))
-  // 注意：logprobs已经是负数，所以直接取平均
   const perplexity = Math.exp(-avgNegativeLogProb);
 
   return perplexity;
 }
 
 // 根据困惑度判断AI概率
+// 注意：chat completions API返回的logprobs是模型回复的概率，不是输入文本的概率
+// 因此困惑度只能作为辅助参考，不能作为主要判断依据
 export function perplexityToAIScore(perplexity: number): number {
-  // 经验值：
-  // AI文本困惑度通常 < 30
-  // 人类文本困惑度通常 > 50
+  if (perplexity === 0) return 50; // 无数据时返回中性值
 
-  if (perplexity < 20) return 95;
-  if (perplexity < 30) return 85;
-  if (perplexity < 40) return 70;
+  // 降低困惑度的权重和置信度
+  // 返回40-60之间的值，作为辅助参考
+  if (perplexity < 10) return 58;
+  if (perplexity < 20) return 55;
+  if (perplexity < 30) return 52;
   if (perplexity < 50) return 50;
-  if (perplexity < 60) return 30;
-  if (perplexity < 80) return 15;
-  return 5;
+  if (perplexity < 80) return 48;
+  if (perplexity < 120) return 45;
+  return 42;
 }
