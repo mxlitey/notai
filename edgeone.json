@@ -4,10 +4,11 @@
   "outputDirectory": ".next",
   "framework": "nextjs",
   "env": {
-    "API_BASE_URL": "https://api.guyu.run",
+    "API_BASE_URL": "@api_base_url",
     "API_KEY": "@api_key",
-    "DETECT_MODEL": "deepseek-v4-flash",
+    "DETECT_MODEL": "@detect_model",
     "AUTH_SECRET": "@auth_secret",
-    "JWT_SECRET": "@jwt_secret"
+    "JWT_SECRET": "@jwt_secret",
+    "PUBLIC_API_KEY": "@public_api_key"
   }
 }

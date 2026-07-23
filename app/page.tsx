@@ -1,13 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
-// 模型配置
-const MODELS = [
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', desc: '速度快，成本低', isFree: false },
-  { id: 'mimo-v2.5', name: 'MiMo V2.5', desc: '小米大模型', isFree: false },
-  { id: 'plan/qwen3-8b', name: 'Qwen3-8B', desc: '通义千问', isFree: true }
-];
+// 模型配置类型
+interface ModelConfig {
+  id: string;
+  name: string;
+  isFree: boolean;
+  supportsLogprobs: boolean;
+}
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -21,8 +22,11 @@ export default function Home() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
 
+  // 模型列表（从API获取）
+  const [models, setModels] = useState<ModelConfig[]>([]);
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+
   // 高级选项
-  const [selectedModels, setSelectedModels] = useState<string[]>(['deepseek-v4-flash']);
   const [enableParagraphDetection, setEnableParagraphDetection] = useState(false);
   const [enableSourceIdentification, setEnableSourceIdentification] = useState(false);
   const [enableSuggestions, setEnableSuggestions] = useState(false);
@@ -31,6 +35,22 @@ export default function Home() {
   const [aiSample, setAiSample] = useState('');
   const [humanSample, setHumanSample] = useState('');
   const [compareResult, setCompareResult] = useState<any>(null);
+
+  // 获取模型列表
+  useEffect(() => {
+    fetch('/api/models')
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.data) {
+          setModels(data.data);
+          // 默认选择第一个模型
+          if (data.data.length > 0) {
+            setSelectedModels([data.data[0].id]);
+          }
+        }
+      })
+      .catch(err => console.error('获取模型列表失败:', err));
+  }, []);
 
   // 认证
   const handleAuth = async () => {
@@ -238,28 +258,32 @@ export default function Home() {
               {/* 模型选择 */}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">检测模型（可多选）</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                  {MODELS.map(model => (
-                    <label
-                      key={model.id}
-                      className={`flex items-center p-3 border rounded-lg cursor-pointer transition-colors ${selectedModels.includes(model.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedModels.includes(model.id)}
-                        onChange={() => toggleModel(model.id)}
-                        className="mr-3"
-                      />
-                      <div>
-                        <div className="font-medium">
-                          {model.name}
-                          {model.isFree && <span className="ml-2 text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">免费</span>}
+                {models.length === 0 ? (
+                  <div className="text-gray-500">加载模型列表...</div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    {models.map(model => (
+                      <label
+                        key={model.id}
+                        className={`flex items-center p-3 border rounded-lg cursor-pointer transition-colors ${selectedModels.includes(model.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedModels.includes(model.id)}
+                          onChange={() => toggleModel(model.id)}
+                          className="mr-3"
+                        />
+                        <div>
+                          <div className="font-medium">
+                            {model.name}
+                            {model.isFree && <span className="ml-2 text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">免费</span>}
+                          </div>
+                          <div className="text-xs text-gray-500">{model.supportsLogprobs ? '支持困惑度检测' : '基于特征分析'}</div>
                         </div>
-                        <div className="text-xs text-gray-500">{model.desc}</div>
-                      </div>
-                    </label>
-                  ))}
-                </div>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* 功能开关 */}
@@ -299,7 +323,7 @@ export default function Home() {
             <div className="flex justify-center mb-8">
               <button
                 onClick={handleDetect}
-                disabled={loading || (inputMode === 'text' ? text.length < 50 : !url)}
+                disabled={loading || (inputMode === 'text' ? text.length < 50 : !url) || selectedModels.length === 0}
                 className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
               >
                 {loading ? '检测中...' : '开始检测'}
@@ -438,9 +462,9 @@ export default function Home() {
                       <span className="text-gray-600 capitalize">{source}</span>
                       <div className="flex items-center gap-2">
                         <div className="w-20 h-2 bg-gray-200 rounded overflow-hidden">
-                          <div className="h-full bg-blue-500" style={{ width: `${prob}%` }} />
+                          <div className="h-full bg-blue-500" style={{ width: `${prob as number}%` }} />
                         </div>
-                        <span className="text-sm font-semibold w-10 text-right">{prob}%</span>
+                        <span className="text-sm font-semibold w-10 text-right">{prob as number}%</span>
                       </div>
                     </div>
                   ))}
