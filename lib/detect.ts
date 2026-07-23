@@ -50,17 +50,22 @@ async function callModel(text: string, modelId: string): Promise<{ perplexity: n
     const data = await response.json();
     console.log(`[检测] API响应:`, JSON.stringify(data).substring(0, 500));
 
-    if (model.supportsLogprobs && data.choices?.[0]?.logprobs?.content) {
+    // 检查logprobs - 支持两种字段格式
+    // 1. content（标准格式，如 glm-5.2）
+    // 2. reasoning_content（非标准格式，如 deepseek-v4-flash）
+    const logprobsData = data.choices?.[0]?.logprobs;
+    const logprobsContent = logprobsData?.content || logprobsData?.reasoning_content;
+
+    if (model.supportsLogprobs && logprobsContent) {
       // 支持logprobs的模型
-      const logprobsContent: LogprobsContent[] = data.choices[0].logprobs.content;
-      const logprobs = logprobsContent.map((item: LogprobsContent) => item.logprob);
-      const perplexity = calculatePerplexity(logprobs);
+      const logprobsValues = logprobsContent.map((item: LogprobsContent) => item.logprob);
+      const perplexity = calculatePerplexity(logprobsValues);
       const aiProbability = perplexityToAIScore(perplexity);
       console.log(`[检测] 困惑度: ${perplexity}, AI概率: ${aiProbability}%`);
       return { perplexity, aiProbability };
     } else {
       // 不支持logprobs的模型，使用统计特征分析
-      console.log(`[检测] 模型不支持logprobs，使用统计特征分析`);
+      console.log(`[检测] 模型不支持logprobs或无返回数据，使用统计特征分析`);
       const stats = analyzeStatistics(text);
       const aiProbability = stats.overallScore;
       return { perplexity: 0, aiProbability };

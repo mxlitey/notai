@@ -8,7 +8,7 @@ import type { DetectRequest } from '@/types';
 export async function POST(request: NextRequest) {
   try {
     const body: DetectRequest = await request.json();
-    const { text, url, token, models, enableParagraphDetection, enableSourceIdentification, enableSuggestions } = body;
+    const { text, url, token, models } = body;
 
     // 验证token
     if (!token || !(await verifyToken(token))) {
@@ -68,12 +68,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 执行检测
+    // 执行检测 - 默认开启所有功能
     const result = await detectAIContent(content, {
       models: selectedModels,
-      enableParagraphDetection: enableParagraphDetection === true,
-      enableSourceIdentification: enableSourceIdentification === true,
-      enableSuggestions: enableSuggestions === true
+      enableParagraphDetection: true,      // 默认开启
+      enableSourceIdentification: true,    // 默认开启
+      enableSuggestions: true              // 默认开启
     });
 
     return NextResponse.json({

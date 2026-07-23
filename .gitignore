@@ -32,3 +32,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# test files
+*.py
+*.ps1
+test_*.txt
+test_*.json
+r_*.json
+logprobs_results.json
