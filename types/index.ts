@@ -35,6 +35,8 @@ export interface ParagraphResult {
   endIndex: number;       // 结束位置
   aiProbability: number;  // AI概率
   isAI: boolean;          // 是否为AI生成
+  suggestions?: string[]; // 针对该段的修改建议
+  modifiedText?: string;  // 修改后的文本示例
 }
 
 // 多模型检测结果

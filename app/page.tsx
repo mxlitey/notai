@@ -367,10 +367,10 @@ export default function Home() {
               </div>
             )}
 
-            {/* 段落级检测 - 全文标注 */}
+            {/* 段落级检测 - 分段详情 */}
             {result.paragraphResults && result.paragraphResults.length > 0 && (
               <div className="mb-6">
-                <h3 className="font-semibold mb-3">全文标注</h3>
+                <h3 className="font-semibold mb-3">分段检测详情</h3>
                 <div className="text-sm mb-3 text-gray-500">
                   <span className="inline-block mr-4">
                     <span className="inline-block w-4 h-4 bg-red-200 border border-red-300 mr-1"></span>
@@ -385,33 +385,56 @@ export default function Home() {
                     不确定
                   </span>
                 </div>
-                <div className="bg-white border border-gray-200 rounded-lg p-4 leading-relaxed">
-                  {result.paragraphResults.map((p: any, i: number) => {
-                    const bgColor = p.aiProbability > 70 
-                      ? 'bg-red-100 border-b-2 border-red-300' 
-                      : p.aiProbability > 40 
-                        ? 'bg-yellow-100 border-b-2 border-yellow-300' 
-                        : 'bg-green-100 border-b-2 border-green-300';
-                    return (
-                      <span
-                        key={i}
-                        className={`${bgColor} px-1 rounded cursor-pointer hover:opacity-80`}
-                        title={`AI概率: ${p.aiProbability}%`}
-                      >
-                        {p.paragraph}
-                      </span>
-                    );
-                  })}
-                </div>
-                <div className="mt-4 space-y-2">
-                  <h4 className="font-medium text-gray-700">分段详情</h4>
+                <div className="space-y-4">
                   {result.paragraphResults.map((p: any, i: number) => (
-                    <div key={i} className={`p-2 rounded text-sm ${p.aiProbability > 70 ? 'bg-red-50 border-l-4 border-red-400' : p.aiProbability > 40 ? 'bg-yellow-50 border-l-4 border-yellow-400' : 'bg-green-50 border-l-4 border-green-400'}`}>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="font-medium">片段 {i + 1}</span>
-                        <span className="font-bold">{p.aiProbability}% AI</span>
+                    <div 
+                      key={i} 
+                      className={`p-4 rounded-lg border ${
+                        p.aiProbability > 70 
+                          ? 'bg-red-50 border-red-200' 
+                          : p.aiProbability > 40 
+                            ? 'bg-yellow-50 border-yellow-200' 
+                            : 'bg-green-50 border-green-200'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="font-semibold text-gray-800">片段 {i + 1}</span>
+                        <span className={`text-lg font-bold ${
+                          p.aiProbability > 70 
+                            ? 'text-red-600' 
+                            : p.aiProbability > 40 
+                              ? 'text-yellow-600' 
+                              : 'text-green-600'
+                        }`}>
+                          {p.aiProbability}% AI
+                        </span>
                       </div>
-                      <div className="text-gray-600">{p.paragraph.substring(0, 80)}{p.paragraph.length > 80 ? '...' : ''}</div>
+                      
+                      {/* 原文 */}
+                      <div className="mb-3">
+                        <div className="text-xs text-gray-500 mb-1">原文：</div>
+                        <div className="p-2 bg-white bg-opacity-60 rounded text-gray-700">{p.paragraph}</div>
+                      </div>
+
+                      {/* 修改建议 */}
+                      {p.suggestions && p.suggestions.length > 0 && (
+                        <div className="mb-3">
+                          <div className="text-xs text-gray-500 mb-1">修改建议：</div>
+                          <ul className="text-sm text-gray-600 space-y-1">
+                            {p.suggestions.map((s: string, j: number) => (
+                              <li key={j}>{s}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* 修改后的文本 */}
+                      {p.modifiedText && (
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">修改示例：</div>
+                          <div className="p-2 bg-blue-50 border border-blue-200 rounded text-gray-700">{p.modifiedText}</div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

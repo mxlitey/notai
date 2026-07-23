@@ -76,6 +76,83 @@ async function callModel(text: string, modelId: string): Promise<{ perplexity: n
   }
 }
 
+// 生成针对片段的修改建议
+function generateParagraphSuggestions(text: string, aiProbability: number): { suggestions: string[]; modifiedText?: string } {
+  const suggestions: string[] = [];
+  
+  if (aiProbability < 40) {
+    return { suggestions: ['该片段风格自然，无需修改。'] };
+  }
+
+  // 检测句式问题
+  const sentences = text.split(/[。！？.!?]/).filter(s => s.trim());
+  const sentenceLengths = sentences.map(s => s.length);
+  const avgLength = sentenceLengths.reduce((a, b) => a + b, 0) / sentenceLengths.length;
+  const variance = sentenceLengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / sentenceLengths.length;
+
+  // 检测AI常用词
+  const aiWords = ['首先', '其次', '此外', '总之', '综上所述', '由此可见', '因此', '所以', '值得注意的是'];
+  const foundAiWords = aiWords.filter(word => text.includes(word));
+
+  // 检测重复词汇
+  const words = text.match(/[\u4e00-\u9fa5]+/g) || [];
+  const wordCount: Record<string, number> = {};
+  words.forEach(w => {
+    if (w.length > 1) {
+      wordCount[w] = (wordCount[w] || 0) + 1;
+    }
+  });
+  const repeatedWords = Object.entries(wordCount).filter(([_, count]) => count > 2).map(([word]) => word);
+
+  // 生成建议
+  if (variance < 20) {
+    suggestions.push('• 句子长度过于均匀，建议增加长短句变化');
+  }
+
+  if (foundAiWords.length > 0) {
+    suggestions.push(`• 减少使用AI常用词：${foundAiWords.join('、')}`);
+  }
+
+  if (repeatedWords.length > 0) {
+    suggestions.push(`• 避免重复词汇：${repeatedWords.slice(0, 3).join('、')}`);
+  }
+
+  if (avgLength > 30) {
+    suggestions.push('• 适当拆分长句，增加节奏感');
+  }
+
+  suggestions.push('• 加入个人观点或具体例子');
+  suggestions.push('• 使用更口语化的表达');
+
+  // 生成修改后的示例（简单处理）
+  let modifiedText = text;
+  
+  // 替换AI常用词
+  const replacements: Record<string, string> = {
+    '首先': '一开始',
+    '其次': '然后',
+    '此外': '另外',
+    '总之': '总的来说',
+    '综上所述': '综合来看',
+    '由此可见': '可以看出',
+    '因此': '所以',
+    '所以': '于是',
+    '值得注意的是': '需要指出的是'
+  };
+
+  for (const [word, replacement] of Object.entries(replacements)) {
+    modifiedText = modifiedText.replace(new RegExp(word, 'g'), replacement);
+  }
+
+  // 添加一些口语化标记
+  if (aiProbability > 70 && sentences.length > 1) {
+    const randomIndex = Math.floor(Math.random() * sentences.length);
+    modifiedText = modifiedText.replace(sentences[randomIndex], `说实话，${sentences[randomIndex]}`);
+  }
+
+  return { suggestions, modifiedText: modifiedText !== text ? modifiedText : undefined };
+}
+
 // 段落级检测（全文标注）
 export async function detectParagraphs(text: string, modelId: string = 'deepseek-v4-flash'): Promise<ParagraphResult[]> {
   // 按多种方式分割：句子结束符、换行
@@ -88,12 +165,15 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
   if (sentences.length === 0) {
     // 如果无法分割，直接返回整体
     const { aiProbability } = await callModel(text, modelId);
+    const { suggestions, modifiedText } = generateParagraphSuggestions(text, aiProbability);
     return [{
       paragraph: text,
       startIndex: 0,
       endIndex: text.length,
       aiProbability,
-      isAI: aiProbability > 60
+      isAI: aiProbability > 60,
+      suggestions,
+      modifiedText
     }];
   }
 
@@ -120,20 +200,26 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
     
     try {
       const { aiProbability } = await callModel(chunk.text, modelId);
+      const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, aiProbability);
       return {
         paragraph: chunk.text,
         startIndex: 0,
         endIndex: 0,
         aiProbability,
-        isAI: aiProbability > 60
+        isAI: aiProbability > 60,
+        suggestions,
+        modifiedText
       };
     } catch {
+      const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, 50);
       return {
         paragraph: chunk.text,
         startIndex: 0,
         endIndex: 0,
         aiProbability: 50,
-        isAI: false
+        isAI: false,
+        suggestions,
+        modifiedText
       };
     }
   });
