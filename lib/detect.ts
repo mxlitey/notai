@@ -226,8 +226,14 @@ export async function detectParagraphs(text: string, modelId: string = 'deepseek
 
   const resolvedResults = await Promise.all(promises);
   
-  // 过滤掉null结果
-  return resolvedResults.filter((r): r is ParagraphResult => r !== null);
+  // 过滤掉null结果并返回
+  const filteredResults: ParagraphResult[] = [];
+  for (const r of resolvedResults) {
+    if (r !== null) {
+      filteredResults.push(r);
+    }
+  }
+  return filteredResults;
 }
 
 // AI来源识别
