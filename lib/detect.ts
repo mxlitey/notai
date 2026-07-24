@@ -166,8 +166,8 @@ ${text}`;
   try {
     let response = await doFetch(body);
 
-    // 若 response_format 不被支持（可能返回400/503），移除该字段重试一次
-    if (response.status === 400 || response.status === 503) {
+    // 若 response_format 不被支持（可能返回400/500/503），移除该字段重试一次
+    if (response.status === 400 || response.status === 500 || response.status === 503) {
       console.warn(`[Prompt检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
       const bodyNoFmt = { ...body };
       delete bodyNoFmt.response_format;
@@ -383,8 +383,8 @@ ${fragments}`;
     messages: [{ role: 'user', content: prompt }],
     // 动态计算：每个片段约 150 tokens 输出 + 基础 500 tokens
     max_tokens: 150 * chunks.length + 500,
-    temperature: 0.1,
-    response_format: { type: 'json_object' }
+    temperature: 0.1
+    // 注意：不使用 response_format，因为我们需要数组格式，json_object 要求对象格式
   };
 
   // 打印请求体大小用于调试
@@ -403,14 +403,6 @@ ${fragments}`;
 
   try {
     let response = await doFetch(body);
-
-    // response_format 不支持则移除重试（400/503）
-    if (response.status === 400 || response.status === 503) {
-      console.warn(`[段落检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
-      const bodyNoFmt = { ...body };
-      delete bodyNoFmt.response_format;
-      response = await doFetch(bodyNoFmt);
-    }
 
     if (!response.ok) {
       let errorDetail = '';
