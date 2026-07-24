@@ -381,11 +381,15 @@ ${fragments}`;
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    // 每个片段约 200 tokens + 基础空间 1000 tokens
-    max_tokens: Math.min(4000, 200 * chunks.length + 1000),
+    // 动态计算：每个片段约 150 tokens 输出 + 基础 500 tokens
+    max_tokens: 150 * chunks.length + 500,
     temperature: 0.1,
     response_format: { type: 'json_object' }
   };
+
+  // 打印请求体大小用于调试
+  const promptLength = prompt.length;
+  console.log(`[段落检测] ${chunks.length} 个片段，prompt 长度 ${promptLength} 字符，max_tokens ${body.max_tokens}`);
 
   const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
     method: 'POST',
@@ -412,10 +416,10 @@ ${fragments}`;
       let errorDetail = '';
       try {
         const errData = await response.json();
-        errorDetail = errData.error?.message || JSON.stringify(errData);
+        errorDetail = JSON.stringify(errData);
       } catch { /* ignore */ }
       console.error(`[段落检测] API请求失败: ${response.status} ${errorDetail}`);
-      return new Map();
+      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
     }
 
     const data = await response.json();
@@ -431,7 +435,7 @@ ${fragments}`;
     return parseBatchResponse(content);
   } catch (error) {
     console.error('[段落检测] 异常:', error);
-    return new Map();
+    throw error;
   }
 }
 
@@ -456,12 +460,11 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
     throw new Error('无法分割文本进行段落检测');
   }
 
-  // 每5句一组，最多8片段，单片段300字上限
+  // 每5句一组，单片段300字上限
   const CHUNK_SIZE = 5;
-  const MAX_CHUNKS = 8;
   const MAX_CHUNK_CHARS = 300;
   const chunks: ChunkInfo[] = [];
-  for (let i = 0; i < sentences.length && chunks.length < MAX_CHUNKS; i += CHUNK_SIZE) {
+  for (let i = 0; i < sentences.length; i += CHUNK_SIZE) {
     const group = sentences.slice(i, i + CHUNK_SIZE);
     if (group.length === 0) continue;
     let chunkText = group.map(g => g.text).join('');

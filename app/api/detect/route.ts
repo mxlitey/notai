@@ -56,10 +56,6 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    if (content.length > 10000) {
-      content = content.substring(0, 10000);
-    }
-
     // 执行检测 - 默认开启所有功能
     const result = await detectAIContent(content, {
       enableParagraphDetection: true,      // 默认开启

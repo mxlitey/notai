@@ -185,7 +185,7 @@ export default function Home() {
                 className="w-full h-48 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none"
                 placeholder="请粘贴要检测的文章内容..."
               />
-              <div className="mt-2 text-right text-sm text-gray-500">{text.length} / 10000</div>
+              <div className="mt-2 text-right text-sm text-gray-500">{text.length} 字符</div>
             </>
           ) : (
             <>
