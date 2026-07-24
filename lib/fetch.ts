@@ -38,7 +38,8 @@ export async function fetchArticleFromUrl(url: string): Promise<string> {
       ? extractWechatContent(html)
       : extractMainContent(html);
 
-    return text;
+    // 限制最多10000字符
+    return text.substring(0, 10000);
   } catch (error) {
     if (error instanceof Error) {
       throw error;

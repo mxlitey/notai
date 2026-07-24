@@ -9,7 +9,7 @@ import type { DetectRequest } from '@/types';
 export async function POST(request: NextRequest) {
   try {
     const body: DetectRequest = await request.json();
-    const { text, url, token } = body;
+    const { text, url, token, modelId } = body;
 
     // 验证token
     if (!token || !(await verifyToken(token))) {
@@ -56,11 +56,19 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
+    if (content.length > 10000) {
+      return NextResponse.json({
+        success: false,
+        error: '文本太长，最多支持10000个字符'
+      }, { status: 400 });
+    }
+
     // 执行检测 - 默认开启所有功能
     const result = await detectAIContent(content, {
       enableParagraphDetection: true,      // 默认开启
       enableSourceIdentification: true,    // 默认开启
-      enableSuggestions: true              // 默认开启
+      enableSuggestions: true,             // 默认开启
+      modelId                              // 使用指定模型（可选）
     });
 
     return NextResponse.json({

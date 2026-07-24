@@ -77,6 +77,7 @@ export interface DetectRequest {
   text?: string;
   url?: string;
   token: string;
+  modelId?: string;  // 可选：指定检测模型
   enableParagraphDetection?: boolean;  // 是否启用段落级检测
   enableSourceIdentification?: boolean;  // 是否启用来源识别
   enableSuggestions?: boolean;  // 是否生成修改建议

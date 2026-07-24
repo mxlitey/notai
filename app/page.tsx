@@ -12,6 +12,10 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
+  const [models, setModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('');
+  const [defaultModel, setDefaultModel] = useState<string>('');
+  const [showLoginModal, setShowLoginModal] = useState(false);  // 登录弹窗
 
   // 检查本地缓存的token
   useEffect(() => {
@@ -39,6 +43,24 @@ export default function Home() {
     }
   }, []);
 
+  // 加载模型列表
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetch('/api/models')
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            setModels(data.data.models);
+            setDefaultModel(data.data.defaultModel);
+            setSelectedModel(data.data.defaultModel);
+          }
+        })
+        .catch(err => {
+          console.error('加载模型列表失败:', err);
+        });
+    }
+  }, [isAuthenticated]);
+
   // 认证
   const handleAuth = async () => {
     setLoading(true);
@@ -58,6 +80,7 @@ export default function Home() {
         setIsAuthenticated(true);
         // 保存token到本地缓存
         localStorage.setItem('notai_token', data.token);
+        setShowLoginModal(false);  // 关闭弹窗
       } else {
         setError(data.error || '认证失败');
       }
@@ -79,13 +102,19 @@ export default function Home() {
 
   // 检测
   const handleDetect = async () => {
+    // 未登录，弹出登录窗口
+    if (!isAuthenticated) {
+      setShowLoginModal(true);
+      return;
+    }
+
     setLoading(true);
     setError('');
     setResult(null);
 
     const body = inputMode === 'url'
-      ? { url, token }
-      : { text, token };
+      ? { url, token, modelId: selectedModel }
+      : { text, token, modelId: selectedModel };
 
     try {
       const res = await fetch('/api/detect', {
@@ -108,41 +137,6 @@ export default function Home() {
     }
   };
 
-  // 认证界面
-  if (!isAuthenticated) {
-    return (
-      <main className="min-h-screen flex items-center justify-center bg-gradient-to-b from-gray-100 to-gray-200">
-        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full mx-4">
-          <h1 className="text-3xl font-bold text-center mb-2">NotAI</h1>
-          <p className="text-gray-500 text-center mb-6">AI内容检测工具</p>
-
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">访问密钥</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="请输入访问密钥"
-              onKeyPress={(e) => e.key === 'Enter' && handleAuth()}
-            />
-          </div>
-
-          {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">{error}</div>}
-
-          <button
-            onClick={handleAuth}
-            disabled={loading || !apiKey}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {loading ? '验证中...' : '进入'}
-          </button>
-        </div>
-      </main>
-    );
-  }
-
-  // 主界面
   return (
     <main className="min-h-screen bg-gray-50 py-8 px-4">
       <div className="max-w-5xl mx-auto">
@@ -151,12 +145,14 @@ export default function Home() {
             <h1 className="text-4xl font-bold mb-2">NotAI</h1>
             <p className="text-gray-500">检测文章是否由AI生成</p>
           </div>
-          <button
-            onClick={handleLogout}
-            className="text-gray-500 hover:text-gray-700 text-sm underline"
-          >
-            退出登录
-          </button>
+          {isAuthenticated && (
+            <button
+              onClick={handleLogout}
+              className="text-gray-500 hover:text-gray-700 text-sm underline"
+            >
+              退出登录
+            </button>
+          )}
         </div>
 
         {/* 输入区域 */}
@@ -182,26 +178,30 @@ export default function Home() {
               <div className="relative">
                 <textarea
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => setText(e.target.value.substring(0, 10000))}
                   className="w-full h-48 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none pr-20"
-                  placeholder="请粘贴要检测的文章内容..."
+                  placeholder="请粘贴要检测的文章内容（最多10000字符）..."
                 />
                 <button
                   onClick={async () => {
                     try {
                       const clipText = await navigator.clipboard.readText();
-                      setText(clipText);
+                      setText(clipText.substring(0, 10000));
                     } catch (err) {
                       console.error('粘贴失败:', err);
                     }
                   }}
                   className="absolute top-2 right-2 px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
-                  title="从剪贴板粘贴"
+                  title="从剪贴板粘贴（最多10000字符）"
                 >
                   粘贴
                 </button>
               </div>
-              <div className="mt-2 text-right text-sm text-gray-500">{text.length} 字符</div>
+              <div className="mt-2 text-right text-sm">
+                <span className={text.length >= 10000 ? 'text-red-600 font-medium' : 'text-gray-500'}>
+                  {text.length} / 10000 字符
+                </span>
+              </div>
             </>
           ) : (
             <>
@@ -228,20 +228,71 @@ export default function Home() {
                   粘贴
                 </button>
               </div>
-              <div className="mt-2 text-sm text-gray-500">支持微信公众号、知乎、博客等文章链接</div>
+              <div className="mt-2 text-sm text-gray-500">
+                支持微信公众号、知乎、博客等文章链接（最多提取10000字符）
+              </div>
             </>
           )}
         </div>
+
+        {/* 模型选择 */}
+        {models.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-lg p-4 mb-6">
+            <div className="mb-2 text-sm text-gray-600 font-medium">
+              检测模型：
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {models.map(model => {
+                const isFree = model.endsWith('-free');
+                // 处理模型名称：去掉 -free 后缀，取 / 右边的内容
+                let displayName = isFree ? model.replace(/-free$/i, '') : model;
+                if (displayName.includes('/')) {
+                  displayName = displayName.split('/').pop() || displayName;
+                }
+                
+                return (
+                  <label
+                    key={model}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer transition-colors ${
+                      selectedModel === model
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="model"
+                      value={model}
+                      checked={selectedModel === model}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="hidden"
+                    />
+                    <span className="font-medium">{displayName}</span>
+                    {isFree && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        selectedModel === model
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-green-100 text-green-700'
+                      }`}>
+                        免费
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {error && <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">{error}</div>}
 
         <div className="flex justify-center mb-8">
           <button
             onClick={handleDetect}
-            disabled={loading || (inputMode === 'text' ? text.length < 50 : !url)}
+            disabled={loading || (isAuthenticated && (inputMode === 'text' ? text.length < 50 : !url))}
             className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
-            {loading ? '检测中...' : '开始检测'}
+            {loading ? '检测中...' : isAuthenticated ? '开始检测' : '登录并检测'}
           </button>
         </div>
 
@@ -456,6 +507,51 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* 登录弹窗 */}
+      {showLoginModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full mx-4">
+            <h2 className="text-2xl font-bold text-center mb-2">登录验证</h2>
+            <p className="text-gray-500 text-center mb-6">请输入访问密钥以使用检测功能</p>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">访问密钥</label>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="请输入访问密钥"
+                onKeyPress={(e) => e.key === 'Enter' && handleAuth()}
+                autoFocus
+              />
+            </div>
+
+            {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">{error}</div>}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowLoginModal(false);
+                  setError('');
+                  setApiKey('');
+                }}
+                className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-lg font-medium hover:bg-gray-200 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleAuth}
+                disabled={loading || !apiKey}
+                className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {loading ? '验证中...' : '登录'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
