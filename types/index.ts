@@ -38,6 +38,7 @@ export interface ParagraphResult {
   aiProbability: number;  // AI概率
   isAI: boolean;          // 是否为AI生成
   reason?: string;        // 模型给出的评价
+  signals?: string[];     // 检测到的信号
   suggestions?: string[]; // 针对该段的修改建议
   modifiedText?: string;  // 修改后的文本示例
   skipped?: boolean;      // 是否跳过检测（如网页代码）

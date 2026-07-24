@@ -408,6 +408,23 @@ export default function Home() {
                         </div>
                       )}
 
+                      {/* 检测信号 */}
+                      {p.signals && p.signals.length > 0 && (
+                        <div className="mb-3">
+                          <div className="text-xs text-gray-500 mb-1">检测信号：</div>
+                          <div className="flex flex-wrap gap-2">
+                            {p.signals.map((signal: string, k: number) => (
+                              <span
+                                key={k}
+                                className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full"
+                              >
+                                {signal}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {/* 修改建议 */}
                       {p.suggestions && p.suggestions.length > 0 && (
                         <div className="mb-3">
