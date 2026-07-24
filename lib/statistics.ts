@@ -19,6 +19,7 @@ function variance(numbers: number[]): number {
 
 // 句长方差分析
 // 返回AI概率（0-100），只作为辅助参考
+// 注意：人类正式文体也可能句长均匀，此指标单独不可靠
 export function analyzeSentenceLength(text: string): number {
   const sentences = splitSentences(text);
   if (sentences.length === 0) return 50;
@@ -27,26 +28,14 @@ export function analyzeSentenceLength(text: string): number {
   const varLength = variance(lengths);
   const avgLength = lengths.reduce((a, b) => a + b, 0) / lengths.length;
 
-  // AI特征：句子长度极其均匀（方差很小）且句子较长
-  // 人类特征：句子长度变化大，有短句有长句
-  
-  let score = 50; // 基准值
+  // 降低该指标区分度：人类正式文体也会规整
+  // 只在极其规整时才轻度提示AI
+  let score = 50; // 中性基准
 
-  // 方差极度均匀（方差<平均长度的5%）才开始怀疑AI
-  if (varLength < avgLength * 0.05 && avgLength > 25) {
-    score = 62;
-  } else if (varLength < avgLength * 0.1 && avgLength > 25) {
-    score = 55;
-  } else if (varLength > avgLength * 0.5) {
-    // 方差很大，更可能是人类
-    score = 38;
-  } else {
-    score = 48;
-  }
-
-  // 如果有非常短的句子（<5字），更可能是人类
-  if (lengths.some(l => l <= 5 && lengths.length > 3)) {
-    score -= 5;
+  if (varLength < avgLength * 0.03 && avgLength > 30 && sentences.length > 5) {
+    score = 58;  // 极度规整，轻度提示
+  } else if (varLength > avgLength * 0.6) {
+    score = 42;  // 句长跳跃，轻度人类特征
   }
 
   return Math.max(20, Math.min(80, score));
