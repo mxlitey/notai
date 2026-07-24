@@ -1,4 +1,6 @@
 // 中文分词（简单实现，基于标点和空格分割）
+import { AI_TEMPLATE_WORDS } from './ai-words';
+
 function tokenize(text: string): string[] {
   const tokens = text.split(/[\s，。！？、；：""''【】（）《》\n]+/);
   return tokens.filter(t => t.length > 0);
@@ -100,12 +102,7 @@ export function analyzePunctuation(text: string): number {
 
 // AI常用词检测
 export function analyzeAIKeywords(text: string): number {
-  const aiKeywords = [
-    '首先', '其次', '此外', '另外', '总之', '综上所述', 
-    '由此可见', '值得注意的是', '需要指出的是', '值得一提',
-    '总的来说', '简而言之', '换句话说', '从某种意义上说',
-    '在此基础上', '与此同时', '不仅...而且', '既...又'
-  ];
+  const aiKeywords = AI_TEMPLATE_WORDS;
 
   let count = 0;
   for (const keyword of aiKeywords) {
@@ -144,12 +141,12 @@ export function analyzeStatistics(text: string) {
   const keywordScore = analyzeAIKeywords(text);
 
   // 加权平均
-  // 降低各指标权重，避免误判
+  // AI 关键词是最可靠信号，抬高权重
   const overallScore = Math.round(
-    sentenceScore * 0.25 + 
-    lexicalScore * 0.2 + 
-    punctuationScore * 0.15 + 
-    keywordScore * 0.4
+    sentenceScore * 0.20 +
+    lexicalScore * 0.15 +
+    punctuationScore * 0.15 +
+    keywordScore * 0.50
   );
 
   return {

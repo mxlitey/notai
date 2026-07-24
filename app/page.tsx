@@ -317,7 +317,9 @@ export default function Home() {
                     <div key={mr.modelId} className="flex justify-between items-center p-3 bg-gray-50 rounded">
                       <div>
                         <div className="font-medium">{mr.modelName}</div>
-                        <div className="text-xs text-gray-500">本地特征评分</div>
+                        <div className="text-xs text-gray-500">模型评分</div>
+                        {mr.reason && <div className="text-xs text-gray-400 mt-1 break-all">{mr.reason}</div>}
+                        {mr.degraded && <div className="text-xs text-orange-500 mt-1">（已降级到本地）</div>}
                       </div>
                       <div className={`text-lg font-bold ${mr.aiProbability > 70 ? 'text-red-600' : mr.aiProbability > 50 ? 'text-orange-500' : 'text-green-600'}`}>
                         {mr.aiProbability}%

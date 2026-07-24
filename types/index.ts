@@ -47,6 +47,9 @@ export interface ModelResult {
   modelName: string;
   aiProbability: number;
   perplexity: number;
+  reason?: string;      // 模型给出的判定依据
+  signals?: string[];   // 检测到的具体信号
+  degraded?: boolean;   // 是否降级到本地检测
 }
 
 // API响应类型

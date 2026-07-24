@@ -1,6 +1,8 @@
 // 拓扑特征结构分析
 // 检测文本的逻辑结构、信息密度分布、论证深度变化
 
+import { AI_TEMPLATE_WORDS } from './ai-words';
+
 // 分割句子
 function splitSentences(text: string): string[] {
   const sentences = text.split(/[。！？\n]+/).filter(s => s.trim().length > 0);
@@ -53,10 +55,11 @@ export function analyzeInformationDensity(text: string): number {
   let score = 50;
 
   // AI特征：密度方差极小（分布均匀）
-  if (densityVariance < avgDensity * 0.05 && paragraphs.length > 3) {
+  // 只在极端均匀时才提示，避免误判优秀人类写作
+  if (densityVariance < avgDensity * 0.02 && paragraphs.length > 4) {
     score = 65;  // 方差极小，信息分布过于均匀
-  } else if (densityVariance < avgDensity * 0.15) {
-    score = 55;
+  } else if (densityVariance < avgDensity * 0.05) {
+    score = 52;
   } else if (densityVariance > avgDensity * 0.5) {
     score = 38;  // 方差大，信息分布有起伏，更像人类
   } else {
@@ -67,36 +70,30 @@ export function analyzeInformationDensity(text: string): number {
 }
 
 // 逻辑连接强度分析
-// AI文本：段落间逻辑连接词密度高，线性推进
+// AI文本：段落间 AI 模板连接词密度高，线性推进
 // 人类文本：连接松散，有跳跃
+// 注意：自然连接词（所以/因此/但是等）不计入 AI 特征，正式人类文章常用
 export function analyzeLogicalConnection(text: string): number {
   const sentences = splitSentences(text);
   if (sentences.length < 3) return 50;
 
-  // AI常用逻辑连接词
-  const logicalConnectors = [
-    '因此', '所以', '由于', '因为', '导致', '使得', '从而',
-    '首先', '其次', '然后', '接着', '最后', '此外', '另外',
-    '总之', '综上', '由此可见', '可以得出', '一方面', '另一方面',
-    '与此同时', '在此基础上', '基于此', '据此', '由此'
-  ];
-
+  // 只统计 AI 模板词（强信号），自然连接词不计入
   let connectorCount = 0;
-  for (const conn of logicalConnectors) {
+  for (const conn of AI_TEMPLATE_WORDS) {
     const matches = text.match(new RegExp(conn, 'g'));
     if (matches) connectorCount += matches.length;
   }
 
-  // 句子间连接密度
+  // 句子间 AI 模板词密度
   const density = connectorCount / sentences.length;
 
   let score = 50;
-  if (density > 0.3) {
-    score = 68;  // 连接词密集，逻辑线性，AI特征明显
-  } else if (density > 0.15) {
+  if (density > 0.4) {
+    score = 68;  // 每 2-3 句一个 AI 模板词，AI 特征明显
+  } else if (density > 0.2) {
     score = 58;
   } else if (density < 0.05) {
-    score = 38;  // 连接稀疏，更像人类
+    score = 38;  // 模板词稀疏，更像人类
   } else {
     score = 48;
   }
@@ -126,10 +123,11 @@ export function analyzeArgumentDepth(text: string): number {
 
   let score = 50;
   // AI特征：深度方差小（始终深入或始终浅显）
-  if (depthVariance < avgDepth * 0.1 && sentences.length > 4) {
+  // 只在极端均匀时才提示，避免误判优秀人类写作
+  if (depthVariance < avgDepth * 0.04 && sentences.length > 5) {
     score = 62;
-  } else if (depthVariance < avgDepth * 0.2) {
-    score = 55;
+  } else if (depthVariance < avgDepth * 0.1) {
+    score = 52;
   } else if (depthVariance > avgDepth * 0.6) {
     score = 38;  // 深度变化大，更像人类
   } else {
@@ -151,10 +149,11 @@ export function analyzeParagraphLength(text: string): number {
   const avgLength = lengths.reduce((a, b) => a + b, 0) / lengths.length;
 
   let score = 50;
-  if (lengthVariance < avgLength * 0.05 && paragraphs.length > 3) {
+  // 只在极端均匀时才提示，避免误判优秀人类写作
+  if (lengthVariance < avgLength * 0.02 && paragraphs.length > 4) {
     score = 65;
-  } else if (lengthVariance < avgLength * 0.15) {
-    score = 55;
+  } else if (lengthVariance < avgLength * 0.05) {
+    score = 52;
   } else if (lengthVariance > avgLength * 0.5) {
     score = 38;
   } else {

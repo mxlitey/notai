@@ -1,6 +1,7 @@
 import { analyzeStatistics } from './statistics';
 import { analyzeTopology } from './topology';
 import { getModelConfig } from './models';
+import { AI_TEMPLATE_WORDS } from './ai-words';
 import type { DetectionResult, ParagraphResult, ModelResult } from '@/types';
 
 // API配置
@@ -8,107 +9,225 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://api.guyu.run';
 const API_KEY = process.env.API_KEY || '';
 const PROMPT_MODEL = process.env.PROMPT_MODEL || 'deepseek-v4-flash';
 
-// 位段检测：本地统计特征 + 拓扑分析
-function detectText(text: string): { perplexity: number; aiProbability: number } {
-  const stats = analyzeStatistics(text);
-  return {
-    perplexity: 0,
-    aiProbability: stats.overallScore
-  };
+// 本地综合评分权重：统计特征（AI关键词最可靠）+ 拓扑分析
+const LOCAL_WEIGHTS = { stats: 0.6, topo: 0.4 };
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
 }
 
 // 本地综合检测：统计特征 + 拓扑分析
 function detectLocal(text: string): { perplexity: number; aiProbability: number } {
   const stats = analyzeStatistics(text);
   const topo = analyzeTopology(text);
-  // 统计特征 40% + 拓扑分析 60%
-  const score = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
+  const score = Math.round(stats.overallScore * LOCAL_WEIGHTS.stats + topo.overallScore * LOCAL_WEIGHTS.topo);
   return {
     perplexity: 0,
     aiProbability: Math.max(0, Math.min(100, score))
   };
 }
 
-// Prompt 模型判断 - 调用AI让模型判断文本是否AI生成
-async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Promise<{ aiProbability: number; reason: string }> {
+// ----- 结构化 Prompt 模型判断 -----
+
+interface ModelPromptResult {
+  aiProbability: number;
+  reason: string;
+  signals: string[];
+  degraded: boolean;
+}
+
+// 剥 markdown 代码围栏
+function stripCodeFence(s: string): string {
+  return s.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+}
+
+// 解析模型返回的 JSON（含 score/reason/signals），三层降级
+function parseModelJson(content: string): { score: number; reason: string; signals: string[] } | null {
+  const cleaned = stripCodeFence(content);
+
+  // Step 1: 整体 JSON.parse
+  try {
+    const obj = JSON.parse(cleaned);
+    if (obj && typeof obj.score === 'number') {
+      return {
+        score: obj.score,
+        reason: String(obj.reason || ''),
+        signals: Array.isArray(obj.signals) ? obj.signals.map(String) : []
+      };
+    }
+  } catch { /* 继续 */ }
+
+  // Step 2: 截取最外层 { ... }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    try {
+      const obj = JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
+      if (obj && typeof obj.score === 'number') {
+        return {
+          score: obj.score,
+          reason: String(obj.reason || ''),
+          signals: Array.isArray(obj.signals) ? obj.signals.map(String) : []
+        };
+      }
+    } catch { /* 继续 */ }
+  }
+
+  // Step 3: 正则提取 score
+  const scoreMatch = cleaned.match(/"score"\s*:\s*(\d+)/);
+  if (scoreMatch) {
+    const reasonMatch = cleaned.match(/"reason"\s*:\s*"([^"]*)"/);
+    return {
+      score: parseInt(scoreMatch[1], 10),
+      reason: reasonMatch ? reasonMatch[1] : '',
+      signals: []
+    };
+  }
+
+  // Step 4: 兜底——纯数字输出兼容
+  const numMatch = cleaned.match(/\d+/);
+  if (numMatch) {
+    return { score: parseInt(numMatch[0], 10), reason: '纯数字输出', signals: [] };
+  }
+
+  return null;
+}
+
+// Prompt 模型判断 - 调用AI让模型判断文本是否AI生成（结构化 JSON 输出）
+async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Promise<ModelPromptResult> {
   if (!API_KEY) {
     console.warn('[Prompt检测] API_KEY未配置，降级为本地检测');
     const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: 'API未配置' };
+    return { aiProbability: result.aiProbability, reason: 'API未配置', signals: [], degraded: true };
   }
 
   // 文本截断（控制token消耗）
   const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text;
 
   // 关键：避免「文笔好/正式文体」被误判为AI的核心信号是AI模板词密度
-  const prompt = `你是AI文本检测专家。判断以下中文文章是否AI生成，只输出一个整数(0-100)，越高越像AI。
+  const prompt = `你是AI文本检测专家。判断以下中文文章是否由AI生成，输出严格JSON。
 
-【重要纠偏】文笔好≠AI生成。人类写的优秀文章也可能逻辑清晰、用词规范。不要因为这些就判高分。
+【核心原则】
+1. 文笔好≠AI生成。人类优秀文章也可能逻辑清晰、用词规范、结构严谨、论证充分。不要因为这些就判高分。
+2. 唯一可靠的高分信号是"AI模板词"高频出现 + 句式高度套路化。仅在确凿证据下才给高分（>60）。
+3. 出现以下任何一种"人类痕迹"，倾向判低分（<40）：
+   - 个人经历 / 具体事例 / 具体地名 / 具体人物 / 具体时间
+   - 主观情感 / 口语化表达 / 方言 / 俚语 / 自嘲
+   - 句式不规整（短句、断句、倒装、反问、感叹句）
+   - 感叹号、省略号、破折号等情感标点
+   - 跑题、跳跃、个人联想、不完美的过渡
 
-【唯一可靠判定信号】AI模板词高频出现 = AI生成迹象：
-- "首先...其次...最后..."的列举式结构 高频出现
-- "综上所述""由此可见""值得注意的是"等套路连接词
-- "不仅...而且""一方面...另一方面"的对比式
-- 每段都用"总之/总而言之"收尾
+【AI模板词清单（强信号）】
+- 列举式：首先 / 其次 / 再次 / 然后 / 接着 / 最后 / 第一/第二/第三
+- 总结式：综上所述 / 由此可见 / 总而言之 / 总的来说 / 综上 / 由此
+- 转折套路：值得注意的是 / 需要指出的是 / 值得一提的是 / 不可否认 / 毋庸置疑
+- 对比式：不仅...而且 / 一方面...另一方面 / 既...又
+- 推进式：在此基础上 / 与此同时 / 基于此 / 据此 / 由此
 
-判定规则：
-- 0-20：口语化、个人视角鲜明、有个人经历/具体事例/主观感受
-- 20-40：文笔不错但有人类痕迹（特定事例/地方用语/情感起伏/非完美句式）
-- 40-60：判断模糊，无明显AI模板词也无明显个人痕迹
-- 60-80：出现AI模板词但混入部分人类风格
-- 80-100：大量AI模板词，句式极度规整，无个人视角
+【自然连接词不算AI信号】所以、因此、由于、因为、但是、然而、不过——这些是中文正常连接词，正式人类文章常用，不能仅凭它们判高分。
 
-只输出一个整数(0-100)，不要任何其他文字。
+【评分尺度】
+- 0-20：明显人类（口语化、个人视角鲜明、有具体事例/情感/方言）
+- 20-40：可能人类（文笔不错但有人类痕迹：特定事例/方言/情感起伏/非完美句式）
+- 40-60：模糊（无明显AI模板词，也无明显个人痕迹）
+- 60-80：偏AI（出现AI模板词但混入部分人类风格）
+- 80-100：高AI（大量AI模板词 + 句式极度规整 + 无个人视角 + 信息密度均匀）
 
-文章：
+【输出格式】严格JSON，不要任何额外文字、不要markdown代码块：
+{"score": 0到100的整数, "reason": "一句话核心依据，指出主要信号", "signals": ["信号1", "信号2"]}
+
+示例：
+{"score": 75, "reason": "高频出现首先/其次/综上所述，无个人视角", "signals": ["AI模板词:首先/其次/综上所述", "句式均匀", "无个人事例"]}
+
+【待检测文章】
 ${truncatedText}`;
 
+  const body: Record<string, unknown> = {
+    model: modelId,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 400,
+    temperature: 0.1,
+    response_format: { type: 'json_object' }
+  };
+
+  const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`
+    },
+    body: JSON.stringify(b),
+    signal: AbortSignal.timeout(60000)  // 60秒超时
+  });
+
   try {
-    const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${API_KEY}`
-      },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 10,
-        temperature: 0.1
-      }),
-      signal: AbortSignal.timeout(90000)  // 90秒超时
-    });
+    let response = await doFetch(body);
+
+    // 若 response_format 不被支持（通常返回400），移除该字段重试一次
+    if (response.status === 400) {
+      console.warn(`[Prompt检测] 模型 ${modelId} 可能不支持 response_format，移除后重试`);
+      const bodyNoFmt = { ...body };
+      delete bodyNoFmt.response_format;
+      response = await doFetch(bodyNoFmt);
+    }
 
     if (!response.ok) {
       console.error(`[Prompt检测] API请求失败: ${response.status}`);
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: 'API请求失败' };
+      return { aiProbability: result.aiProbability, reason: 'API请求失败', signals: [], degraded: true };
     }
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content || '';
-    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 100)}`);
+    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
 
-    // 提取评分（只保留数字）
-    const scoreMatch = content.match(/\d+/);
-    if (!scoreMatch) {
+    const parsed = parseModelJson(content);
+    if (parsed === null) {
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: '无法解析评分' };
+      return { aiProbability: result.aiProbability, reason: '无法解析评分', signals: [], degraded: true };
     }
 
-    const score = Math.max(0, Math.min(100, parseInt(scoreMatch[0], 10)));
-    return { aiProbability: score, reason: '模型判断' };
+    return {
+      aiProbability: clamp(parsed.score, 0, 100),
+      reason: parsed.reason || '模型判断',
+      signals: parsed.signals,
+      degraded: false
+    };
   } catch (error) {
     console.error('[Prompt检测] 异常:', error);
     const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: '调用异常' };
+    return { aiProbability: result.aiProbability, reason: '调用异常', signals: [], degraded: true };
   }
+}
+
+// 一致性纠偏：综合模型评分与本地评分
+function reconcileScore(
+  promptScore: number,
+  localScore: number,
+  stats: { overallScore: number }
+): number {
+  const diff = Math.abs(promptScore - localScore);
+
+  // 路径 A：本地硬证据——AI 关键词密度极高，但模型给低分（模型可能漏看模板词）
+  if (stats.overallScore > 70 && promptScore < 30) {
+    console.log(`[纠偏] 路径A 本地硬证据 prompt=${promptScore} local=${localScore} → 50/50`);
+    return clamp(Math.round(promptScore * 0.5 + localScore * 0.5), 0, 100);
+  }
+
+  // 路径 B：严重分歧 > 40，倾向于信任模型（本地特征已校准但仍偏噪）
+  if (diff > 40) {
+    console.log(`[纠偏] 路径B 严重分歧 diff=${diff} → 85/15`);
+    return clamp(Math.round(promptScore * 0.85 + localScore * 0.15), 0, 100);
+  }
+
+  // 路径 C：默认 模型 70% + 本地 30%
+  return clamp(Math.round(promptScore * 0.7 + localScore * 0.3), 0, 100);
 }
 
 // 生成针对片段的修改建议
 function generateParagraphSuggestions(text: string, aiProbability: number): { suggestions: string[]; modifiedText?: string } {
   const suggestions: string[] = [];
-  
+
   if (aiProbability < 50) {
     return { suggestions: ['该片段风格自然，无明显AI特征。'] };
   }
@@ -119,9 +238,8 @@ function generateParagraphSuggestions(text: string, aiProbability: number): { su
   const avgLength = sentenceLengths.reduce((a, b) => a + b, 0) / (sentenceLengths.length || 1);
   const varLen = sentenceLengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / (sentenceLengths.length || 1);
 
-  // 检测AI常用词
-  const aiWords = ['首先', '其次', '此外', '总之', '综上所述', '由此可见', '因此', '值得注意的是', '需要指出的是'];
-  const foundAiWords = aiWords.filter(word => text.includes(word));
+  // 检测AI常用词（使用共享清单）
+  const foundAiWords = AI_TEMPLATE_WORDS.filter(word => text.includes(word));
 
   // 检测重复词汇
   const words = text.match(/[\u4e00-\u9fa5]+/g) || [];
@@ -147,7 +265,7 @@ function generateParagraphSuggestions(text: string, aiProbability: number): { su
   }
 
   if (foundAiWords.length > 0) {
-    suggestions.push(`【用词】检测到AI常用词：${foundAiWords.join('、')}`);
+    suggestions.push(`【用词】检测到AI常用词：${foundAiWords.slice(0, 6).join('、')}`);
     suggestions.push('  - 用自己的话重新表达这些连接关系');
   }
 
@@ -162,87 +280,202 @@ function generateParagraphSuggestions(text: string, aiProbability: number): { su
   return { suggestions };
 }
 
-// 段落级检测（全文标注）
-export async function detectParagraphs(text: string, modelId: string = 'deepseek-v4-flash'): Promise<ParagraphResult[]> {
-  // 按多种方式分割：句子结束符、换行
-  const sentences = text
-    .replace(/([。！？.!?])/g, '$1|||')
-    .split('|||')
-    .map(s => s.trim())
-    .filter(s => s.length >= 10);
-  
+// ----- 段落级批量检测 -----
+
+interface SentenceInfo { text: string; start: number; end: number; }
+interface ChunkInfo { index: number; text: string; start: number; end: number; }
+
+// 解析批量段落返回的 JSON 数组，三层降级
+function parseBatchResponse(content: string): Map<number, { score: number; reason: string }> {
+  const result = new Map<number, { score: number; reason: string }>();
+  const cleaned = stripCodeFence(content);
+
+  // Step 1: 整体 JSON.parse
+  try {
+    const arr = JSON.parse(cleaned);
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        if (item && typeof item.index === 'number' && typeof item.score === 'number') {
+          result.set(item.index, {
+            score: clamp(item.score, 0, 100),
+            reason: String(item.reason || '').substring(0, 200)
+          });
+        }
+      }
+      if (result.size > 0) return result;
+    }
+  } catch { /* 继续 */ }
+
+  // Step 2: 截取最外层 [ ... ]
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket = cleaned.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    try {
+      const arr = JSON.parse(cleaned.substring(firstBracket, lastBracket + 1));
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item && typeof item.index === 'number' && typeof item.score === 'number') {
+            result.set(item.index, {
+              score: clamp(item.score, 0, 100),
+              reason: String(item.reason || '').substring(0, 200)
+            });
+          }
+        }
+        if (result.size > 0) return result;
+      }
+    } catch { /* 继续 */ }
+  }
+
+  // Step 3: 逐对象正则提取
+  const objRegex = /\{[^{}]*"index"\s*:\s*(\d+)[^{}]*"score"\s*:\s*(\d+)[^{}]*\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = objRegex.exec(cleaned)) !== null) {
+    const idx = parseInt(m[1], 10);
+    const score = clamp(parseInt(m[2], 10), 0, 100);
+    const reasonMatch = m[0].match(/"reason"\s*:\s*"([^"]*)"/);
+    result.set(idx, { score, reason: reasonMatch ? reasonMatch[1] : '' });
+  }
+
+  return result;
+}
+
+// 一次 API 调用检测所有片段，返回 { index: { score, reason } }
+async function callBatchParagraphModel(
+  chunks: ChunkInfo[],
+  modelId: string
+): Promise<Map<number, { score: number; reason: string }>> {
+  if (!API_KEY || chunks.length === 0) return new Map();
+
+  const fragments = chunks.map(ch => `【片段${ch.index}】\n${ch.text}`).join('\n\n');
+  const prompt = `你是AI文本检测专家。下面有 ${chunks.length} 个文本片段，逐个判断是否AI生成。输出严格JSON数组。
+
+【核心原则】
+1. 文笔好≠AI生成。仅"AI模板词高频 + 句式套路化"才是高分信号。
+2. 自然连接词（所以/因此/但是/因为）不计入AI特征。
+3. 个人事例、口语化、感叹号、不规整句式 → 倾向低分。
+
+【AI模板词】首先/其次/最后/综上所述/由此可见/值得注意的是/不仅...而且/一方面...另一方面 等。
+
+【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致。不要输出任何其他文字、不要markdown代码块：
+[
+  {"index": 1, "score": 0到100整数, "reason": "一句话依据"},
+  {"index": 2, "score": ..., "reason": ...}
+]
+
+${fragments}`;
+
+  const body: Record<string, unknown> = {
+    model: modelId,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: Math.min(2000, 100 * chunks.length + 200),
+    temperature: 0.1,
+    response_format: { type: 'json_object' }
+  };
+
+  const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`
+    },
+    body: JSON.stringify(b),
+    signal: AbortSignal.timeout(60000)
+  });
+
+  try {
+    let response = await doFetch(body);
+
+    // response_format 不支持则移除重试
+    if (response.status === 400) {
+      console.warn(`[段落检测] 模型 ${modelId} 可能不支持 response_format，移除后重试`);
+      const bodyNoFmt = { ...body };
+      delete bodyNoFmt.response_format;
+      response = await doFetch(bodyNoFmt);
+    }
+
+    if (!response.ok) {
+      console.error(`[段落检测] API请求失败: ${response.status}`);
+      return new Map();
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || '';
+    console.log(`[段落检测] 模型 ${modelId} 返回: ${content.substring(0, 300)}`);
+
+    return parseBatchResponse(content);
+  } catch (error) {
+    console.error('[段落检测] 异常:', error);
+    return new Map();
+  }
+}
+
+// 段落级检测（全文标注，批量调用模型）
+export async function detectParagraphs(text: string, modelId: string = PROMPT_MODEL): Promise<ParagraphResult[]> {
+  // 句子分割 + 位置追踪
+  const sentences: SentenceInfo[] = [];
+  const re = /[^。！？\n]+[。！？\n]?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const s = m[0].trim();
+    if (s.length >= 10) {
+      sentences.push({ text: s, start: m.index, end: m.index + m[0].length });
+    }
+  }
+
   if (sentences.length === 0) {
-    // 如果无法分割，直接返回整体
+    // 无法分割，直接返回整体
     const { aiProbability } = detectLocal(text);
-    const { suggestions, modifiedText } = generateParagraphSuggestions(text, aiProbability);
+    const { suggestions } = generateParagraphSuggestions(text, aiProbability);
     return [{
       paragraph: text,
       startIndex: 0,
       endIndex: text.length,
       aiProbability,
       isAI: aiProbability > 60,
-      suggestions,
-      modifiedText
+      suggestions
     }];
   }
 
-  // 每5个句子作为一个检测单元
-  const chunkSize = 5;
-  const chunks: { text: string }[] = [];
-  
-  for (let i = 0; i < sentences.length; i += chunkSize) {
-    const chunkSentences = sentences.slice(i, i + chunkSize);
-    if (chunkSentences.length > 0) {
-      chunks.push({
-        text: chunkSentences.join('')
-      });
+  // 每5句一组，最多8片段，单片段300字上限
+  const CHUNK_SIZE = 5;
+  const MAX_CHUNKS = 8;
+  const MAX_CHUNK_CHARS = 300;
+  const chunks: ChunkInfo[] = [];
+  for (let i = 0; i < sentences.length && chunks.length < MAX_CHUNKS; i += CHUNK_SIZE) {
+    const group = sentences.slice(i, i + CHUNK_SIZE);
+    if (group.length === 0) continue;
+    let chunkText = group.map(g => g.text).join('');
+    let start = group[0].start;
+    let end = group[group.length - 1].end;
+    if (chunkText.length > MAX_CHUNK_CHARS) {
+      chunkText = chunkText.substring(0, MAX_CHUNK_CHARS);
+      end = start + chunkText.length;
     }
+    chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 限制最多10个片段，避免超时
-  const limitedChunks = chunks.slice(0, 10);
+  // 批量调用模型
+  let batchResult = new Map<number, { score: number; reason: string }>();
+  try {
+    batchResult = await callBatchParagraphModel(chunks, modelId);
+  } catch (error) {
+    console.error('[段落检测] 批量调用失败，降级到本地:', error);
+  }
 
-  // 并行调用API加速
-  const results: ParagraphResult[] = [];
-  const promises = limitedChunks.map(async (chunk) => {
-    if (chunk.text.trim().length < 20) return null;
-    
-    try {
-      const { aiProbability } = detectLocal(chunk.text);
-      const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, aiProbability);
-      return {
-        paragraph: chunk.text,
-        startIndex: 0,
-        endIndex: 0,
-        aiProbability,
-        isAI: aiProbability > 60,
-        suggestions,
-        modifiedText
-      };
-    } catch {
-      const { suggestions, modifiedText } = generateParagraphSuggestions(chunk.text, 50);
-      return {
-        paragraph: chunk.text,
-        startIndex: 0,
-        endIndex: 0,
-        aiProbability: 50,
-        isAI: false,
-        suggestions,
-        modifiedText
-      };
-    }
+  // 组装结果（缺失片段降级到本地，位置信息保留）
+  return chunks.map(ch => {
+    const r = batchResult.get(ch.index);
+    const ai = r ? r.score : detectLocal(ch.text).aiProbability;
+    const { suggestions } = generateParagraphSuggestions(ch.text, ai);
+    return {
+      paragraph: ch.text,
+      startIndex: ch.start,
+      endIndex: ch.end,
+      aiProbability: ai,
+      isAI: ai > 60,
+      suggestions
+    };
   });
-
-  const resolvedResults = await Promise.all(promises);
-  
-  // 过滤掉null结果并返回
-  const filteredResults: ParagraphResult[] = [];
-  for (const r of resolvedResults) {
-    if (r !== null) {
-      filteredResults.push(r);
-    }
-  }
-  return filteredResults;
 }
 
 // AI来源识别
@@ -374,52 +607,42 @@ export async function detectAIContent(
   console.log('[检测] 开始检测, 模型:', models);
 
   try {
-    // 1. 多模型循环（仅显示用，实际仍走本地检测）
-    const modelResults: ModelResult[] = [];
-    let totalPerplexity = 0;
-    let totalAiProbability = 0;
-    let validModels = 0;
-
-    for (const modelId of models) {
-      const localResult = detectLocal(text);
-      const modelConfig = getModelConfig(modelId);
-      modelResults.push({
-        modelId,
-        modelName: modelConfig?.name || modelId,
-        aiProbability: localResult.aiProbability,
-        perplexity: localResult.perplexity
-      });
-      totalPerplexity += localResult.perplexity;
-      totalAiProbability += localResult.aiProbability;
-      validModels++;
-    }
-
-    const perplexity = totalPerplexity / validModels;
-    const localAiProbability = totalAiProbability / validModels;
-
-    // 2. 统计特征分析 + 拓扑分析
+    // 1. 本地评分（一次性，所有模型共用）
     const stats = analyzeStatistics(text);
     const topo = analyzeTopology(text);
+    const localScore = Math.round(stats.overallScore * LOCAL_WEIGHTS.stats + topo.overallScore * LOCAL_WEIGHTS.topo);
+    const perplexity = 0;
 
-    // 3. 初步综合评分（本地特征）
-    // 统计特征 40% + 拓扑分析 60%
-    const localScore = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
-    const initialScore = Math.max(10, Math.min(90, localScore));
-
-    // 4. 必须调用Prompt模型判断（多模型并行，取平均）
+    // 2. 真实多模型并行调用
     console.log('[检测] 调用模型深度判断...');
     const promptModels = models.length > 0 ? models : [PROMPT_MODEL];
     const promptResults = await Promise.all(
       promptModels.map(m => callModelPrompt(text, m))
     );
-    // 多模型平均评分
-    const promptScore = Math.round(
-      promptResults.reduce((sum, r) => sum + r.aiProbability, 0) / promptResults.length
-    );
-    const promptReason = promptResults[0]?.reason || '模型判断';
 
-    // 综合评分：模型 70% + 本地 30%（以模型为准）
-    const aiProbability = Math.max(0, Math.min(100, Math.round(promptScore * 0.7 + localScore * 0.3)));
+    // 3. 构造 modelResults（真实分数 + 依据 + 降级标记）
+    const modelResults: ModelResult[] = promptResults.map((r, i) => {
+      const cfg = getModelConfig(promptModels[i]);
+      return {
+        modelId: promptModels[i],
+        modelName: cfg?.name || promptModels[i],
+        aiProbability: r.aiProbability,
+        perplexity: 0,
+        reason: r.reason,
+        signals: r.signals,
+        degraded: r.degraded
+      };
+    });
+
+    // 4. 只对未降级模型取平均作为 promptScore；全部降级则回退本地
+    const validResults = promptResults.filter(r => !r.degraded);
+    const promptScore = validResults.length > 0
+      ? Math.round(validResults.reduce((s, r) => s + r.aiProbability, 0) / validResults.length)
+      : localScore;
+    const promptReason = validResults[0]?.reason || '本地降级';
+
+    // 5. 一致性纠偏综合评分
+    const aiProbability = reconcileScore(promptScore, localScore, stats);
 
     // 置信度判断
     let confidence: 'high' | 'medium' | 'low';
@@ -431,32 +654,30 @@ export async function detectAIContent(
       confidence = 'low';
     }
     console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${promptScore} = 综合评分 ${aiProbability}% (${promptReason})`);
-    void initialScore;
-    void promptReason;
 
-    // 5. 置信区间
-    const confidenceInterval = calculateConfidenceInterval(aiProbability, validModels);
+    // 6. 置信区间（样本数=成功返回的模型数）
+    const confidenceInterval = calculateConfidenceInterval(aiProbability, Math.max(1, validResults.length));
 
-    // 6. 生成分析说明
+    // 7. 生成分析说明
     const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, promptScore);
 
-    // 7. 段落级检测（可选）
+    // 8. 段落级检测（可选）
     let paragraphResults: ParagraphResult[] | undefined;
     if (enableParagraphDetection && text.length > 200) {
       try {
-        paragraphResults = await detectParagraphs(text, models[0] || 'deepseek-v4-flash');
+        paragraphResults = await detectParagraphs(text, models[0] || PROMPT_MODEL);
       } catch (error) {
         console.error('[检测] 段落级检测失败:', error);
       }
     }
 
-    // 8. AI来源识别（可选）
+    // 9. AI来源识别（可选）
     let sourceIdentification;
     if (enableSourceIdentification) {
       sourceIdentification = identifyAISource(text);
     }
 
-    // 9. 修改建议（可选）
+    // 10. 修改建议（可选）
     let suggestions: string[] | undefined;
     if (enableSuggestions) {
       suggestions = generateSuggestions(stats, aiProbability);
@@ -466,7 +687,7 @@ export async function detectAIContent(
 
     return {
       aiProbability,
-      perplexity: Math.round(perplexity * 100) / 100,
+      perplexity,
       modelScore: promptScore,
       localScore,
       confidence,
@@ -515,7 +736,8 @@ function generateAnalysis(
   if (modelResults.length > 1) {
     lines.push(`\n**多模型检测结果**：`);
     modelResults.forEach(r => {
-      lines.push(`- ${r.modelName}: ${r.aiProbability}% AI概率`);
+      const tag = r.degraded ? '（已降级到本地）' : '';
+      lines.push(`- ${r.modelName}: ${r.aiProbability}% AI概率${tag}`);
     });
   }
 
