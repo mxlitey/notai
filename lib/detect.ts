@@ -398,37 +398,63 @@ ${fragments}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(100000)  // 100秒超时
+    signal: AbortSignal.timeout(90000)  // 90秒超时（留10秒给EdgeOne边缘节点）
   });
 
-  try {
-    let response = await doFetch(body);
+  // 重试逻辑：524是边缘节点超时，可重试
+  const MAX_RETRIES = 2;
+  let lastError: Error | null = null;
 
-    if (!response.ok) {
-      let errorDetail = '';
-      try {
-        const errData = await response.json();
-        errorDetail = JSON.stringify(errData);
-      } catch { /* ignore */ }
-      console.error(`[段落检测] API请求失败: ${response.status} ${errorDetail}`);
-      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      let response = await doFetch(body);
+
+      if (!response.ok) {
+        let errorDetail = '';
+        try {
+          const errData = await response.json();
+          errorDetail = JSON.stringify(errData);
+        } catch { /* ignore */ }
+
+        // 如果是 524 超时错误，重试
+        if (response.status === 524 && attempt < MAX_RETRIES) {
+          console.warn(`[段落检测] 524超时，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒后重试
+          continue;
+        }
+
+        console.error(`[段落检测] API请求失败: ${response.status} ${errorDetail}`);
+        throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content || '';
+
+      // 打印完整响应用于调试
+      if (!content) {
+        console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
+        throw new Error('模型返回空内容');
+      }
+      console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
+
+      return parseBatchResponse(content);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      // 只对超时类错误重试
+      if (lastError.message.includes('524') || lastError.message.includes('timeout')) {
+        if (attempt < MAX_RETRIES) {
+          console.warn(`[段落检测] 超时错误，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+      } else {
+        // 其他错误直接抛出
+        throw error;
+      }
     }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
-    
-    // 打印完整响应用于调试
-    if (!content) {
-      console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
-      throw new Error('模型返回空内容');
-    }
-    console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
-
-    return parseBatchResponse(content);
-  } catch (error) {
-    console.error('[段落检测] 异常:', error);
-    throw error;
   }
+
+  throw lastError || new Error('段落检测失败');
 }
 
 // 段落级检测（全文标注，支持多模型并行）
@@ -469,27 +495,47 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 调用单个模型，分批处理（每批最多 5 个片段，避免模型服务端 500 错误）
-  const BATCH_SIZE = 5;
+  // 调用单个模型，分批处理（每批最多 3 个片段，减少超时风险）
+  const BATCH_SIZE = 3;
   const allResults = new Map<number, { score: number; reason: string; suggestions: string[] }>();
-  
+
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
     console.log(`[段落检测] 批次 ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)}，片段 ${batch[0].index}-${batch[batch.length - 1].index}`);
-    
-    const batchResult = await callBatchParagraphModel(batch, modelList[0]);
-    
-    // 合并结果
-    batchResult.forEach((val, idx) => {
-      allResults.set(idx, val);
-    });
+
+    try {
+      const batchResult = await callBatchParagraphModel(batch, modelList[0]);
+
+      // 合并结果
+      batchResult.forEach((val, idx) => {
+        allResults.set(idx, val);
+      });
+    } catch (error) {
+      // 段落检测失败不影响整体检测，记录警告并跳过该批次
+      console.warn(`[段落检测] 批次检测失败，跳过该批次:`, error);
+      // 为失败的片段设置默认值
+      batch.forEach(ch => {
+        allResults.set(ch.index, {
+          score: 50,
+          reason: '段落检测超时，使用默认评分',
+          suggestions: []
+        });
+      });
+    }
   }
 
   // 检查是否所有片段都有结果
   const missingChunks = chunks.filter(ch => !allResults.has(ch.index));
   if (missingChunks.length > 0) {
-    console.error(`[段落检测] 部分片段未返回结果: ${missingChunks.map(c => c.index).join(', ')}`);
-    throw new Error(`部分片段检测失败，请重试`);
+    console.warn(`[段落检测] 部分片段未返回结果，使用默认值: ${missingChunks.map(c => c.index).join(', ')}`);
+    // 为缺失片段设置默认值，而不是抛出错误
+    missingChunks.forEach(ch => {
+      allResults.set(ch.index, {
+        score: 50,
+        reason: '检测超时，使用默认评分',
+        suggestions: []
+      });
+    });
   }
 
   // 组装结果
