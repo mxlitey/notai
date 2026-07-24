@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import html2canvas from 'html2canvas';
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -16,6 +17,7 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [defaultModel, setDefaultModel] = useState<string>('');
   const [showLoginModal, setShowLoginModal] = useState(false);  // 登录弹窗
+  const [showBackToTop, setShowBackToTop] = useState(false);  // 回到顶部按钮
 
   // 检查本地缓存的token
   useEffect(() => {
@@ -61,8 +63,28 @@ export default function Home() {
     }
   }, [isAuthenticated]);
 
+  // 监听滚动，显示/隐藏回到顶部按钮
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 300);
+    };
+    
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  // 回到顶部
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // 认证
   const handleAuth = async () => {
+    if (!apiKey.trim()) {
+      setError('请输入访问密钥');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
@@ -70,8 +92,12 @@ export default function Home() {
       const res = await fetch('/api/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey })
+        body: JSON.stringify({ apiKey: apiKey.trim() })
       });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
 
       const data = await res.json();
 
@@ -84,8 +110,9 @@ export default function Home() {
       } else {
         setError(data.error || '认证失败');
       }
-    } catch {
-      setError('网络错误');
+    } catch (err: any) {
+      console.error('登录错误:', err);
+      setError(err?.message || '网络错误，请检查连接后重试');
     } finally {
       setLoading(false);
     }
@@ -134,6 +161,31 @@ export default function Home() {
       setError('网络错误');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // 生成检测结果图片
+  const imageRef = useRef<HTMLDivElement>(null);
+  
+  const handleGenerateImage = async () => {
+    if (!imageRef.current) return;
+    
+    try {
+      const canvas = await html2canvas(imageRef.current, {
+        scale: 2, // 提高清晰度
+        backgroundColor: '#ffffff',
+        logging: false,
+      });
+      
+      // 转换为图片并下载
+      const image = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = image;
+      link.download = `notai-检测报告-${new Date().getTime()}.png`;
+      link.click();
+    } catch (err) {
+      console.error('生成图片失败:', err);
+      alert('生成图片失败，请稍后重试');
     }
   };
 
@@ -299,7 +351,18 @@ export default function Home() {
         {/* 检测结果 */}
         {result && (
           <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-            <h2 className="text-2xl font-bold mb-6">检测结果</h2>
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold">检测结果</h2>
+              <button
+                onClick={handleGenerateImage}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors flex items-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                生成图片
+              </button>
+            </div>
 
             {/* 主要指标 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -343,7 +406,7 @@ export default function Home() {
                         <div className="text-xs text-gray-500 mb-1">检测信号：</div>
                         <div className="flex flex-wrap gap-2">
                           {mr.signals.map((signal: string, idx: number) => (
-                            <span key={idx} className="inline-block px-2 py-1 text-xs bg-white border border-gray-200 rounded text-gray-700">
+                            <span key={idx} className="inline-flex items-center justify-center px-3 py-1 text-xs bg-white border border-gray-200 rounded text-gray-700 leading-none">
                               {signal}
                             </span>
                           ))}
@@ -378,15 +441,16 @@ export default function Home() {
             {result.sourceIdentification && (
               <div className="mb-6">
                 <h3 className="font-semibold mb-3">可能的AI来源</h3>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   {Object.entries(result.sourceIdentification).map(([source, prob]) => (
-                    <div key={source} className="flex justify-between items-center p-2 bg-gray-50 rounded">
-                      <span className="text-gray-600 capitalize">{source}</span>
+                    <div key={source} className="flex items-center justify-between p-3 bg-gray-50 rounded">
+                      <span className="text-gray-600 capitalize text-sm">{source}</span>
                       <div className="flex items-center gap-2">
-                        <div className="w-20 h-2 bg-gray-200 rounded overflow-hidden">
+                        {/* 进度条：手机端隐藏，平板/电脑端显示 */}
+                        <div className="hidden md:flex flex-1 h-2 bg-gray-200 rounded overflow-hidden max-w-[80px]">
                           <div className="h-full bg-blue-500" style={{ width: `${prob as number}%` }} />
                         </div>
-                        <span className="text-sm font-semibold w-10 text-right">{prob as number}%</span>
+                        <span className="text-sm font-semibold">{prob as number}%</span>
                       </div>
                     </div>
                   ))}
@@ -467,7 +531,7 @@ export default function Home() {
                             {p.signals.map((signal: string, k: number) => (
                               <span
                                 key={k}
-                                className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full"
+                                className="inline-flex items-center justify-center px-3 py-1 bg-blue-100 text-blue-700 text-xs rounded-full leading-none"
                               >
                                 {signal}
                               </span>
@@ -551,6 +615,224 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 隐藏的图片模板（用于生成分享图片） */}
+      {result && (
+        <div
+          ref={imageRef}
+          style={{
+            position: 'absolute',
+            left: '-9999px',
+            top: '-9999px',
+            width: '800px',
+            backgroundColor: '#ffffff',
+            padding: '40px',
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+          }}
+        >
+          {/* 头部 */}
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '30px', borderBottom: '2px solid #3b82f6', paddingBottom: '20px' }}>
+            <h1 style={{ fontSize: '36px', fontWeight: 'bold', color: '#1f2937', margin: 0 }}>NotAI</h1>
+            <span style={{ marginLeft: 'auto', fontSize: '14px', color: '#6b7280' }}>AI内容检测报告</span>
+          </div>
+
+          {/* 主要指标 */}
+          <div style={{ display: 'flex', gap: '20px', marginBottom: '30px' }}>
+            <div style={{ flex: 1, backgroundColor: result.aiProbability > 70 ? '#fee2e2' : result.aiProbability > 50 ? '#fef3c7' : '#d1fae5', padding: '20px', borderRadius: '12px', textAlign: 'center' }}>
+              <div style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>AI概率</div>
+              <div style={{ fontSize: '48px', fontWeight: 'bold', color: result.aiProbability > 70 ? '#dc2626' : result.aiProbability > 50 ? '#d97706' : '#059669' }}>
+                {result.aiProbability}%
+              </div>
+            </div>
+            <div style={{ flex: 1, backgroundColor: '#f3f4f6', padding: '20px', borderRadius: '12px', textAlign: 'center' }}>
+              <div style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>置信度</div>
+              <div style={{ fontSize: '32px', fontWeight: 'bold', color: result.confidence === 'high' ? '#059669' : result.confidence === 'medium' ? '#d97706' : '#6b7280' }}>
+                {result.confidence === 'high' ? '高' : result.confidence === 'medium' ? '中' : '低'}
+              </div>
+            </div>
+            <div style={{ flex: 1, backgroundColor: '#f3f4f6', padding: '20px', borderRadius: '12px', textAlign: 'center' }}>
+              <div style={{ fontSize: '14px', color: '#6b7280', marginBottom: '8px' }}>置信区间</div>
+              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#374151' }}>
+                {result.confidenceInterval.lower}% - {result.confidenceInterval.upper}%
+              </div>
+            </div>
+          </div>
+
+          {/* 检测信号 */}
+          {result.modelResults?.[0]?.signals && result.modelResults[0].signals.length > 0 && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '15px', color: '#1f2937' }}>检测信号</h3>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                {result.modelResults[0].signals.map((signal: string, i: number) => (
+                  <span key={i} style={{ 
+                    backgroundColor: '#dbeafe', 
+                    color: '#1e40af', 
+                    padding: '8px 16px', 
+                    borderRadius: '20px', 
+                    fontSize: '14px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    lineHeight: '1',
+                    height: '28px'
+                  }}>
+                    {signal}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 评价 */}
+          {result.modelResults?.[0]?.reason && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '15px', color: '#1f2937' }}>综合评价</h3>
+              <p style={{ fontSize: '16px', lineHeight: '1.6', color: '#374151', margin: 0 }}>
+                {result.modelResults[0].reason}
+              </p>
+            </div>
+          )}
+
+          {/* 修改建议 */}
+          {result.suggestions && result.suggestions.length > 0 && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '15px', color: '#1f2937' }}>修改建议</h3>
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {result.suggestions.map((s: string, i: number) => (
+                  <li key={i} style={{ fontSize: '14px', lineHeight: '1.8', color: '#374151', marginBottom: '8px' }}>
+                    {s}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* 段落详情 */}
+          {result.paragraphResults && result.paragraphResults.length > 0 && (
+            <div style={{ marginTop: '40px', borderTop: '2px solid #e5e7eb', paddingTop: '30px' }}>
+              <h3 style={{ fontSize: '20px', fontWeight: '600', marginBottom: '20px', color: '#1f2937' }}>
+                段落详情 ({result.paragraphResults.length} 个片段)
+              </h3>
+              
+              {result.paragraphResults.map((para: any, idx: number) => (
+                <div key={idx} style={{ 
+                  marginBottom: '25px', 
+                  padding: '20px', 
+                  backgroundColor: '#f9fafb', 
+                  borderRadius: '12px',
+                  border: '1px solid #e5e7eb'
+                }}>
+                  {/* 段落标题和评分 */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                    <span style={{ fontSize: '16px', fontWeight: '600', color: '#374151' }}>
+                      片段 {para.index}
+                    </span>
+                    <span style={{ 
+                      fontSize: '24px', 
+                      fontWeight: 'bold', 
+                      color: para.aiProbability > 70 ? '#dc2626' : para.aiProbability > 50 ? '#d97706' : '#059669'
+                    }}>
+                      {para.aiProbability}%
+                    </span>
+                  </div>
+
+                  {/* 原文 */}
+                  {para.text && (
+                    <div style={{ marginBottom: '15px' }}>
+                      <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '5px' }}>原文：</div>
+                      <div style={{ fontSize: '14px', color: '#374151', lineHeight: '1.6', backgroundColor: '#ffffff', padding: '10px', borderRadius: '8px' }}>
+                        {para.text.length > 150 ? para.text.substring(0, 150) + '...' : para.text}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 模型评价 */}
+                  {para.reason && (
+                    <div style={{ marginBottom: '15px' }}>
+                      <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '5px' }}>评价：</div>
+                      <div style={{ fontSize: '14px', color: '#374151', lineHeight: '1.6' }}>
+                        {para.reason}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 检测信号 */}
+                  {para.signals && para.signals.length > 0 && (
+                    <div style={{ marginBottom: '10px' }}>
+                      <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '5px' }}>检测信号：</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                        {para.signals.map((signal: string, i: number) => (
+                          <span key={i} style={{ 
+                            backgroundColor: '#dbeafe', 
+                            color: '#1e40af', 
+                            padding: '4px 12px', 
+                            borderRadius: '12px', 
+                            fontSize: '12px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            lineHeight: '1',
+                            height: '24px'
+                          }}>
+                            {signal}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 修改建议 */}
+                  {para.suggestions && para.suggestions.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '5px' }}>建议：</div>
+                      <div style={{ fontSize: '13px', color: '#374151', lineHeight: '1.5' }}>
+                        {para.suggestions.join('；')}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 跳过标记 */}
+                  {para.skipped && (
+                    <div style={{ marginTop: '10px', fontSize: '12px', color: '#9ca3af', fontStyle: 'italic' }}>
+                      此片段已跳过检测
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 底部信息 */}
+          <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '12px', color: '#9ca3af' }}>
+              检测时间: {new Date().toLocaleString('zh-CN')}
+            </span>
+            <span style={{ fontSize: '12px', color: '#9ca3af' }}>
+              文本长度: {result.contentLength} 字符
+            </span>
+          </div>
+
+          {/* 水印 */}
+          <div style={{ marginTop: '20px', textAlign: 'center' }}>
+            <span style={{ fontSize: '12px', color: '#d1d5db' }}>
+              Generated by NotAI - AI内容检测工具
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 回到顶部按钮 */}
+      {showBackToTop && (
+        <button
+          onClick={scrollToTop}
+          className="fixed bottom-8 right-8 w-12 h-12 bg-blue-600 text-white rounded-full shadow-lg hover:bg-blue-700 transition-all duration-300 flex items-center justify-center z-50"
+          title="回到顶部"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+          </svg>
+        </button>
       )}
     </main>
   );

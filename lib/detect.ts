@@ -165,7 +165,7 @@ function parseModelJson(content: string): { score: number; reason: string; signa
 }
 
 // Prompt 模型判断 - 调用AI让模型判断文本是否AI生成（结构化 JSON 输出）
-async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Promise<ModelPromptResult> {
+async function callModelPrompt(text: string, modelId: string = getDefaultModel()): Promise<ModelPromptResult> {
   if (!API_KEY) {
     console.error('[Prompt检测] API_KEY未配置');
     throw new Error('API_KEY未配置，无法进行检测');
@@ -394,62 +394,10 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
     } catch { /* 继续 */ }
   }
 
-  // Step 4: 从推理输出中提取片段评分（针对 mimo-v2.5 等推理模型）
-  // 匹配类似 "片段1: score 15" 或 "index 1: score 15" 的模式
-  const reasoningPatterns = [
-    /片段\s*(\d+)[：:]\s*[^0-9]*(\d{1,3})\s*[%分]?/gi,
-    /index\s*[：:]?\s*(\d+)[^0-9]*(\d{1,3})\s*[%分]?/gi,
-    /["']index["']\s*[：:]\s*(\d+).*?["']score["']\s*[：:]\s*(\d{1,3})/gi
-  ];
-
-  for (const pattern of reasoningPatterns) {
-    let m: RegExpExecArray | null;
-    pattern.lastIndex = 0;  // 重置正则索引
-    while ((m = pattern.exec(cleaned)) !== null) {
-      const idx = parseInt(m[1], 10);
-      const score = clamp(parseInt(m[2], 10), 0, 100);
-      if (idx > 0 && idx <= 100) {  // 合理的片段索引范围
-        result.set(idx, {
-          score,
-          reason: '从推理输出中提取',
-          signals: [],
-          suggestions: []
-        });
-      }
-    }
-    if (result.size > 0) return result;
-  }
-
-  // Step 5: 逐对象正则提取（处理多行 JSON 对象）
-  const objRegex = /\{[\s\S]*?"index"\s*:\s*(\d+)[\s\S]*?"score"\s*:\s*(\d+)[\s\S]*?\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = objRegex.exec(cleaned)) !== null) {
-    const idx = parseInt(m[1], 10);
-    const score = clamp(parseInt(m[2], 10), 0, 100);
-    const reasonMatch = m[0].match(/"reason"\s*:\s*"([\s\S]*?)"/);
-    const reason = reasonMatch ? reasonMatch[1].replace(/\\n/g, ' ').substring(0, 200) : '';
-    
-    // 提取 signals
-    const signalsMatch = m[0].match(/"signals"\s*:\s*\[([\s\S]*?)\]/);
-    let signals: string[] = [];
-    if (signalsMatch) {
-      try {
-        signals = JSON.parse('[' + signalsMatch[1] + ']');
-      } catch { /* 忽略解析错误 */ }
-    }
-    
-    // 提取 suggestions
-    const suggestionsMatch = m[0].match(/"suggestions"\s*:\s*\[([\s\S]*?)\]/);
-    let suggestions: string[] = [];
-    if (suggestionsMatch) {
-      try {
-        suggestions = JSON.parse('[' + suggestionsMatch[1] + ']');
-      } catch { /* 忽略解析错误 */ }
-    }
-    result.set(idx, { score, reason, signals, suggestions });
-  }
-
-  return result;
+  // 所有解析方法都失败，抛出错误
+  console.error('[段落检测] 模型返回格式错误，无法解析JSON:');
+  console.error('返回内容前200字符:', cleaned.substring(0, 200));
+  throw new Error('模型返回格式错误：未找到有效的JSON数据');
 }
 
 // 基于段落检测结果，调用模型进行综合分析
@@ -663,7 +611,7 @@ ${fragments}
 // 段落级检测（全文标注，支持多模型并行）
 export async function detectParagraphs(
   text: string,
-  modelIds: string | string[] = PROMPT_MODEL,
+  modelIds: string | string[] = getDefaultModel(),
   options?: {
     preFilteredSentences?: SentenceInfo[];  // 预过滤的句子列表（可选）
   }
@@ -782,12 +730,12 @@ export async function detectParagraphs(
       }
     } else {
       // 批次失败，使用本地评分
-      console.log(`[段落检测] 批次 ${batchIndex + 1} 失败，使用本地评分降级`);
+      console.log(`[段落检测] 批次 ${batchIndex + 1} 失败，使用本地评分降级，错误:`, error?.message || '未知错误');
       batch.forEach(ch => {
         const { aiProbability } = detectLocal(ch.text);
         allResults.set(ch.index, {
           score: aiProbability,
-          reason: '模型检测失败，使用本地评分',
+          reason: `模型检测失败: ${error?.message || '未知错误'}`,
           signals: [],
           suggestions: []
         });
