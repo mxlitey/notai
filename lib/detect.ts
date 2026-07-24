@@ -13,6 +13,16 @@ const PROMPT_MODELS = (process.env.PROMPT_MODEL || 'deepseek-v4-flash')
   .map(m => m.trim())
   .filter(m => m.length > 0);
 
+// 流式响应回调接口
+export interface DetectCallbacks {
+  onProgress?: (message: string) => void;
+  onStream?: (chunk: string, fullContent: string) => void;  // 流式内容回调
+  onUpdate?: (type: string, data: any) => void;  // 细粒度更新回调
+  onParagraph?: (index: number, data: any) => void;
+  onComplete?: (result: any) => void;
+  onError?: (error: string) => void;
+}
+
 // 获取可用模型列表
 export function getAvailableModels(): string[] {
   return PROMPT_MODELS;
@@ -165,15 +175,17 @@ function parseModelJson(content: string): { score: number; reason: string; signa
 }
 
 // Prompt 模型判断 - 调用AI让模型判断文本是否AI生成（结构化 JSON 输出）
-async function callModelPrompt(text: string, modelId: string = getDefaultModel()): Promise<ModelPromptResult> {
+async function callModelPrompt(
+  text: string,
+  modelId: string = getDefaultModel(),
+  callbacks?: DetectCallbacks
+): Promise<ModelPromptResult> {
   if (!API_KEY) {
-    console.error('[Prompt检测] API_KEY未配置');
-    throw new Error('API_KEY未配置，无法进行检测');
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
   }
 
   // 全文输入，不截断
-  console.log(`[Prompt检测] 文章长度 ${text.length} 字符，全文输入`);
-
   // 关键：避免「文笔好/正式文体」被误判为AI的核心信号是AI模板词密度
   const prompt = `你是AI文本检测专家。判断以下中文文章是否由AI生成，输出严格JSON。
 
@@ -224,8 +236,8 @@ ${text}`;
     messages: [{ role: 'user', content: prompt }],
     // 不限制 max_tokens，让模型完整输出
     temperature: 0.1,
-    response_format: { type: 'json_object' },
-    reasoning_effort: 'low'  // 低推理强度，但某些模型可能不生效
+    stream: true,  // ✅ 流式调用
+    response_format: { type: 'json_object' }
   };
 
   const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
@@ -235,7 +247,7 @@ ${text}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(110000)  // 110秒超时
+    signal: AbortSignal.timeout(115000)  // 115秒超时（EdgeOne支持120秒）
   });
 
   // 不重试，直接返回错误
@@ -244,46 +256,76 @@ ${text}`;
 
     // 若 response_format 不被支持（可能返回400/500/503），移除该字段重试
     if (response.status === 400 || response.status === 500 || response.status === 503) {
-      console.warn(`[Prompt检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format`);
       const bodyNoFmt = { ...body };
       delete bodyNoFmt.response_format;
       response = await doFetch(bodyNoFmt);
     }
 
     if (!response.ok) {
-      // 尝试读取错误详情
-      let errorDetail = '';
+      console.error(`模型检测失败: 模型不可用，请更换模型重试。`);
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
+    }
+
+    // 读取流式响应
+    const reader = response.body?.getReader();
+    if (!reader) {
+      console.error('模型检测失败: 无法获取响应流');
+      throw new Error('模型检测失败: 无法获取响应流');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        if (line === 'data: [DONE]') continue;
+
+        try {
+          const json = JSON.parse(line.slice(6));
+          const content = json.choices?.[0]?.delta?.content || '';
+          if (content) {
+            fullContent += content;
+            // 调用回调，实时推送内容
+            callbacks?.onStream?.(content, fullContent);
+          }
+        } catch (e) {
+          // 忽略解析错误
+        }
+      }
+    }
+
+    // 处理剩余的 buffer（如果有）
+    if (buffer.trim().startsWith('data: ') && buffer.trim() !== 'data: [DONE]') {
       try {
-        const errData = await response.json();
-        errorDetail = errData.error?.message || JSON.stringify(errData);
-      } catch { /* ignore */ }
-
-      console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
-      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
+        const json = JSON.parse(buffer.trim().slice(6));
+        const content = json.choices?.[0]?.delta?.content || '';
+        if (content) {
+          fullContent += content;
+          callbacks?.onStream?.(content, fullContent);
+        }
+      } catch (e) {
+        // 忽略解析错误
+      }
     }
 
-    const data = await response.json();
-    
-    // 智能提取最终结果（过滤推理过程）
-    let content = data.choices?.[0]?.message?.content || '';
-    
-    // 检查是否有 reasoning_content 字段（推理模型的特殊字段）
-    const reasoningContent = data.choices?.[0]?.message?.reasoning_content;
-    if (reasoningContent) {
-      console.log(`[Prompt检测] 检测到推理过程，长度 ${reasoningContent.length} 字符，已过滤`);
+    if (!fullContent) {
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
     }
 
-    // 打印完整响应用于调试
-    if (!content) {
-      console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
-      throw new Error('模型返回空内容');
-    }
-
-    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content}`);
-
-    const parsed = parseModelJson(content);
+    const parsed = parseModelJson(fullContent);
     if (parsed === null) {
-      throw new Error('无法解析模型返回的评分');
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
     }
 
     return {
@@ -293,8 +335,8 @@ ${text}`;
       suggestions: parsed.suggestions
     };
   } catch (error) {
-    console.error(`[Prompt检测] 错误:`, error);
-    throw error;
+    console.error(`模型检测失败: 模型不可用，请更换模型重试。`);
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
   }
 }
 
@@ -308,13 +350,11 @@ function reconcileScore(
 
   // 路径 A：本地硬证据——AI 关键词密度极高，但模型给低分（模型可能漏看模板词）
   if (stats.overallScore > 70 && promptScore < 30) {
-    console.log(`[纠偏] 路径A 本地硬证据 prompt=${promptScore} local=${localScore} → 50/50`);
     return clamp(Math.round(promptScore * 0.5 + localScore * 0.5), 0, 100);
   }
 
   // 路径 B：严重分歧 > 40，倾向于信任模型（本地特征已校准但仍偏噪）
   if (diff > 40) {
-    console.log(`[纠偏] 路径B 严重分歧 diff=${diff} → 85/15`);
     return clamp(Math.round(promptScore * 0.85 + localScore * 0.15), 0, 100);
   }
 
@@ -395,16 +435,16 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
   }
 
   // 所有解析方法都失败，抛出错误
-  console.error('[段落检测] 模型返回格式错误，无法解析JSON:');
-  console.error('返回内容前200字符:', cleaned.substring(0, 200));
-  throw new Error('模型返回格式错误：未找到有效的JSON数据');
+  console.error('模型检测失败: 模型不可用，请更换模型重试。');
+  throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
 }
 
 // 基于段落检测结果，调用模型进行综合分析
 async function callModelOverallAnalysis(
   text: string,
   paragraphResults: ParagraphResult[],
-  modelId: string
+  modelId: string,
+  callbacks?: DetectCallbacks
 ): Promise<{ aiProbability: number; reason: string; signals: string[]; suggestions: string[] } | null> {
   if (!API_KEY) return null;
 
@@ -420,7 +460,7 @@ async function callModelOverallAnalysis(
     ? Math.round(normalResults.reduce((a, b) => a + b.aiProbability, 0) / normalResults.length)
     : 50;
 
-  const prompt = `你是AI文本检测专家。基于段落检测结果对全文进行综合分析。
+  const prompt = `你是AI文本检测专家。基于段落检测结果综合分析全文。
 
 【原文】
 ${text}
@@ -459,31 +499,75 @@ ${JSON.stringify(summary, null, 2)}
         model: modelId,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
+        stream: true,  // ✅ 流式调用
         response_format: { type: 'json_object' }
       }),
-      signal: AbortSignal.timeout(60000)  // 60秒超时
+      signal: AbortSignal.timeout(115000)  // 115秒超时（EdgeOne支持120秒）
     });
 
     if (!response.ok) {
-      console.error(`[综合分析] API错误: ${response.status}`);
+      console.error(`模型检测失败: 模型不可用，请更换模型重试。`);
       return null;
     }
 
-    const data = await response.json();
-    let content = data.choices?.[0]?.message?.content || '';
-
-    // 过滤推理过程
-    if (data.choices?.[0]?.message?.reasoning_content) {
-      console.log(`[综合分析] 检测到推理过程，已过滤`);
+    // 读取流式响应
+    const reader = response.body?.getReader();
+    if (!reader) {
+      console.error('模型检测失败: 无法获取响应流');
+      return null;
     }
 
-    if (!content) {
-      console.error('[综合分析] 模型返回空内容');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        if (line === 'data: [DONE]') continue;
+
+        try {
+          const json = JSON.parse(line.slice(6));
+          const content = json.choices?.[0]?.delta?.content || '';
+          if (content) {
+            fullContent += content;
+            // 调用回调，实时推送内容
+            callbacks?.onStream?.(content, fullContent);
+          }
+        } catch (e) {
+          // 忽略解析错误
+        }
+      }
+    }
+
+    // 处理剩余的 buffer（如果有）
+    if (buffer.trim().startsWith('data: ') && buffer.trim() !== 'data: [DONE]') {
+      try {
+        const json = JSON.parse(buffer.trim().slice(6));
+        const content = json.choices?.[0]?.delta?.content || '';
+        if (content) {
+          fullContent += content;
+          callbacks?.onStream?.(content, fullContent);
+        }
+      } catch (e) {
+        // 忽略解析错误
+      }
+    }
+
+    if (!fullContent) {
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
       return null;
     }
 
     // 解析 JSON
-    const cleaned = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    const cleaned = fullContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
     const result = JSON.parse(cleaned);
 
     if (result && typeof result.score === 'number') {
@@ -497,7 +581,7 @@ ${JSON.stringify(summary, null, 2)}
 
     return null;
   } catch (error) {
-    console.error('[综合分析] 错误:', error);
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
     return null;
   }
 }
@@ -505,34 +589,28 @@ ${JSON.stringify(summary, null, 2)}
 // 一次 API 调用检测所有片段，返回 { index: { score, reason, signals, suggestions } }
 async function callBatchParagraphModel(
   chunks: ChunkInfo[],
-  modelId: string
+  modelId: string,
+  callbacks?: DetectCallbacks
 ): Promise<Map<number, { score: number; reason: string; signals: string[]; suggestions: string[] }>> {
   if (!API_KEY || chunks.length === 0) return new Map();
 
   const fragments = chunks.map(ch => `【片段${ch.index}】\n${ch.text}`).join('\n\n');
 
-  const systemPrompt = `你是AI文本检测专家。直接输出JSON数组，不要推理过程。
+  const systemPrompt = `你是AI文本检测专家。立即输出JSON数组，不要推理过程。
 
-【禁止事项】
-- 禁止输出推理过程、分析步骤、思考内容
-- 禁止输出任何解释性文字
-- 禁止使用 ម 或其他标记
+输出格式：[{"index":N,"score":0-100,"reason":"一句话","signals":["特征1","特征2"],"suggestions":[]}]
 
-【必须格式】
-[{"index": N, "score": 0-100, "reason": "一句话", "signals": ["信号1","信号2"], "suggestions": []}]
+规则：
+1. index 必须与片段编号一致
+2. signals 是特征数组（如：具体人物、真实地名、AI模板词、口语化表达）
+3. score<40 时 suggestions 为空
+4. score>=40 时给1-2条建议`;
 
-【关键规则】
-1. 立即输出JSON数组，不要任何前置内容
-2. index 必须与【片段N】的编号N一致
-3. signals 是检测到的特征数组，如："具体人物"、"真实地名"、"AI模板词"、"口语化表达"、"个人经历"等
-4. score < 40 时 suggestions 为空数组
-5. score >= 40 时给出1-2条修改建议`;
-
-  const userPrompt = `立即输出这 ${chunks.length} 个片段的AI概率评分（JSON数组）：
+  const userPrompt = `输出这${chunks.length}个片段的评分：
 
 ${fragments}
 
-现在立即输出JSON数组：`;
+JSON数组：`;
 
   const body: Record<string, unknown> = {
     model: modelId,
@@ -543,13 +621,9 @@ ${fragments}
     // 不限制 max_tokens，让模型完整输出
     // max_tokens: 不设置，使用 API 默认值或无限制
     temperature: 0.1,
-    reasoning_effort: 'low'  // 低推理强度，但某些模型可能不生效
+    stream: true  // ✅ 流式调用
     // 注意：不使用 response_format，因为我们需要数组格式，json_object 要求对象格式
   };
-
-  // 打印请求体大小用于调试
-  const promptLength = systemPrompt.length + userPrompt.length;
-  console.log(`[段落检测] ${chunks.length} 个片段，prompt 长度 ${promptLength} 字符，max_tokens ${body.max_tokens}`);
 
   const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
     method: 'POST',
@@ -558,7 +632,7 @@ ${fragments}
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(110000)  // 110秒超时
+    signal: AbortSignal.timeout(115000)  // 115秒超时（EdgeOne支持120秒）
   });
 
   // 不重试，直接返回错误
@@ -566,45 +640,72 @@ ${fragments}
     const response = await doFetch(body);
 
     if (!response.ok) {
-      let errorDetail = '';
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
+    }
+
+    // 读取流式响应
+    const reader = response.body?.getReader();
+    if (!reader) {
+      console.error('模型检测失败: 无法获取响应流');
+      throw new Error('模型检测失败: 无法获取响应流');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        if (line === 'data: [DONE]') continue;
+
+        try {
+          const json = JSON.parse(line.slice(6));
+          const content = json.choices?.[0]?.delta?.content || '';
+          if (content) {
+            fullContent += content;
+            // 调用回调，实时推送内容
+            callbacks?.onStream?.(content, fullContent);
+          }
+        } catch (e) {
+          // 忽略解析错误
+        }
+      }
+    }
+
+    // 处理剩余的 buffer（如果有）
+    if (buffer.trim().startsWith('data: ') && buffer.trim() !== 'data: [DONE]') {
       try {
-        const errData = await response.json();
-        errorDetail = JSON.stringify(errData);
-      } catch { /* ignore */ }
-
-      console.error(`[段落检测] API请求失败: ${response.status} ${errorDetail}`);
-      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
+        const json = JSON.parse(buffer.trim().slice(6));
+        const content = json.choices?.[0]?.delta?.content || '';
+        if (content) {
+          fullContent += content;
+          callbacks?.onStream?.(content, fullContent);
+        }
+      } catch (e) {
+        // 忽略解析错误
+      }
     }
 
-    const data = await response.json();
-    
-    // 智能提取最终结果（过滤推理过程）
-    let content = data.choices?.[0]?.message?.content || '';
-    
-    // 检查是否有 reasoning_content 字段（推理模型的特殊字段）
-    const reasoningContent = data.choices?.[0]?.message?.reasoning_content;
-    if (reasoningContent) {
-      console.log(`[段落检测] 检测到推理过程，长度 ${reasoningContent.length} 字符，已过滤`);
+    if (!fullContent) {
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
     }
 
-    // 打印完整响应用于调试
-    if (!content) {
-      console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
-      throw new Error('模型返回空内容');
-    }
-    
-    console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
-    
-    const parsed = parseBatchResponse(content);
-    console.log(`[段落检测] 解析结果: ${parsed.size} 个片段`);
-    parsed.forEach((val, idx) => {
-      console.log(`  片段 ${idx}: score=${val.score}, signals=${JSON.stringify(val.signals)}, suggestions=${JSON.stringify(val.suggestions)}`);
-    });
-    
+    const parsed = parseBatchResponse(fullContent);
+
     return parsed;
   } catch (error) {
-    console.error(`[段落检测] 错误:`, error);
-    throw error;
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
   }
 }
 
@@ -614,10 +715,12 @@ export async function detectParagraphs(
   modelIds: string | string[] = getDefaultModel(),
   options?: {
     preFilteredSentences?: SentenceInfo[];  // 预过滤的句子列表（可选）
+    callbacks?: DetectCallbacks;  // 流式回调
   }
 ): Promise<ParagraphResult[]> {
   // 统一处理为模型数组
   const modelList = Array.isArray(modelIds) ? modelIds : [modelIds];
+  const { callbacks } = options || {};
   
   // 如果提供了预过滤句子，直接使用；否则重新分割
   let sentences: SentenceInfo[];
@@ -625,7 +728,6 @@ export async function detectParagraphs(
   if (options?.preFilteredSentences && options.preFilteredSentences.length > 0) {
     // 使用主检测已过滤的句子（已排除网页代码）
     sentences = options.preFilteredSentences;
-    console.log(`[段落检测] 使用预过滤句子，共 ${sentences.length} 个片段`);
   } else {
     // 原有逻辑：句子分割 + 网页代码过滤
     const allSentences: SentenceInfo[] = [];
@@ -640,11 +742,11 @@ export async function detectParagraphs(
     
     // 过滤网页代码
     sentences = allSentences.filter(s => !isWebCode(s.text));
-    console.log(`[段落检测] 原始 ${allSentences.length} 个片段，过滤后 ${sentences.length} 个`);
   }
 
   if (sentences.length === 0) {
-    throw new Error('无法分割文本进行段落检测');
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
   }
 
   // 每5句一组，单片段300字上限
@@ -664,32 +766,39 @@ export async function detectParagraphs(
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  console.log(`[段落检测] 共 ${chunks.length} 个片段`);
+  // 立即发送段落框架（原文内容，评价和信号待填充）
+  if (callbacks?.onUpdate) {
+    const paragraphFrames = chunks.map((chunk, idx) => ({
+      index: idx,
+      paragraph: chunk.text,
+      aiProbability: 0,  // 待填充
+      reason: '',  // 待填充
+      signals: [],  // 待填充
+      skipped: false
+    }));
+    callbacks.onUpdate('paragraphFrames', paragraphFrames);
+  }
 
   // 单模型分批并行调用（避免串行叠加超时）
   const modelId = modelList[0];  // 使用第一个模型
-  const BATCH_SIZE = 20;  // 每批最多20个片段
+  const BATCH_SIZE = 10;  // 每批最多10个片段
   const batches: ChunkInfo[][] = [];
 
   // 划分批次（余下的片段自动成为最后一批）
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     batches.push(chunks.slice(i, i + BATCH_SIZE));
   }
-  console.log(`[段落检测] 使用模型 ${modelId}，共 ${chunks.length} 个片段，分 ${batches.length} 批并行`);
 
   // 并行请求所有批次
   const batchPromises = batches.map((batch, batchIndex) => {
     const startTime = Date.now();
-    console.log(`[段落检测] [${new Date().toISOString()}] 启动批次 ${batchIndex + 1}/${batches.length}，片段 ${batch[0].index}-${batch[batch.length - 1].index}`);
-    return callBatchParagraphModel(batch, modelId)
+    return callBatchParagraphModel(batch, modelId, callbacks)
       .then(result => {
         const elapsed = Date.now() - startTime;
-        console.log(`[段落检测] [${new Date().toISOString()}] 批次 ${batchIndex + 1} 完成，耗时 ${elapsed}ms`);
         return { batchIndex, result, error: null };
       })
       .catch(error => {
         const elapsed = Date.now() - startTime;
-        console.warn(`[段落检测] [${new Date().toISOString()}] 批次 ${batchIndex + 1} 失败 (耗时 ${elapsed}ms):`, error.message);
         return { batchIndex, result: null, error };
       });
   });
@@ -699,57 +808,48 @@ export async function detectParagraphs(
 
   // 合并结果
   const allResults = new Map<number, { score: number; reason: string; signals: string[]; suggestions: string[] }>();
+  const failedBatches: number[] = []; // 记录失败的批次
+
   batchResults.forEach(({ batchIndex, result, error }) => {
     const batch = batches[batchIndex];
-    console.log(`[段落检测] 处理批次 ${batchIndex + 1}，成功: ${!!result}，错误: ${error ? error.message : '无'}`);
     if (result) {
-      console.log(`[段落检测] 批次 ${batchIndex + 1} 返回 ${result.size} 个结果`);
-      
       // 检查模型返回的 index 是否在批次范围内
       const batchIndices = batch.map(ch => ch.index);
       const returnedIndices = Array.from(result.keys());
       const indicesMatch = returnedIndices.every(idx => batchIndices.includes(idx));
-      
+
       if (!indicesMatch && returnedIndices.length === batch.length) {
         // index 不匹配但数量一致，按位置映射
-        console.log(`[段落检测] 批次 ${batchIndex + 1} index 不匹配，按位置映射`);
         returnedIndices.forEach((returnedIdx, position) => {
           const actualIdx = batchIndices[position];
           const val = result.get(returnedIdx);
           if (val) {
-            console.log(`[段落检测] 映射片段 ${returnedIdx} → ${actualIdx}，score=${val.score}`);
             allResults.set(actualIdx, val);
           }
         });
       } else {
         // index 匹配或无法映射，直接使用
         result.forEach((val, idx) => {
-          console.log(`[段落检测] 存储片段 ${idx} 的结果: score=${val.score}`);
           allResults.set(idx, val);
         });
       }
     } else {
-      // 批次失败，使用本地评分
-      console.log(`[段落检测] 批次 ${batchIndex + 1} 失败，使用本地评分降级，错误:`, error?.message || '未知错误');
-      batch.forEach(ch => {
-        const { aiProbability } = detectLocal(ch.text);
-        allResults.set(ch.index, {
-          score: aiProbability,
-          reason: `模型检测失败: ${error?.message || '未知错误'}`,
-          signals: [],
-          suggestions: []
-        });
-      });
+      // 记录失败的批次
+      failedBatches.push(batchIndex);
     }
   });
-  console.log(`[段落检测] 合并完成，共 ${allResults.size} 个结果`);
+
+  // 如果所有批次都失败，抛出错误
+  if (failedBatches.length === batches.length) {
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
+  }
 
   // 组装结果
   return chunks.map(ch => {
     const r = allResults.get(ch.index);
 
     if (r) {
-      console.log(`[段落检测] 片段 ${ch.index} 结果: score=${r.score}, signals=${JSON.stringify(r.signals)}, suggestions=${JSON.stringify(r.suggestions)}`);
       return {
         paragraph: ch.text,
         startIndex: ch.start,
@@ -841,19 +941,23 @@ export async function detectAIContent(
     enableSourceIdentification?: boolean;
     enableSuggestions?: boolean;
     modelId?: string;  // 可选：指定检测模型
+    callbacks?: DetectCallbacks;  // 流式响应回调
   } = {}
 ): Promise<DetectionResult> {
   const {
     enableParagraphDetection = false,
     enableSourceIdentification = false,
     enableSuggestions = false,
-    modelId: customModelId
+    modelId: customModelId,
+    callbacks
   } = options;
 
   const modelId = customModelId || getDefaultModel();
-  console.log('[检测] 开始检测, 模型:', modelId);
 
   try {
+    // 发送进度：开始检测
+    callbacks?.onProgress?.('开始检测文本...');
+
     // 0. 过滤网页代码片段（带位置信息）
     const sentencesWithPos: SentenceInfo[] = [];
     const re = /[^。！？\n]+[。！？\n]?/g;
@@ -874,33 +978,89 @@ export async function detectAIContent(
     const normalSentences = sentencesWithPos.filter(s => !(s as any).isWebCode);
     const webCodeSentences = sentencesWithPos.filter(s => (s as any).isWebCode);
     
+    // 发送进度：过滤完成
+    callbacks?.onProgress?.(`已过滤文本，共 ${normalSentences.length} 个句子`);
+    
     // 过滤后的文本（移除网页代码）
     const filteredText = normalSentences.map(s => s.text).join('');
-    
-    if (webCodeSentences.length > 0) {
-      console.log(`[检测] 过滤 ${webCodeSentences.length} 个网页代码片段，剩余 ${normalSentences.length} 个正常片段`);
-    }
-    
+
     // 如果过滤后文本为空，使用原文（避免完全无法检测）
     const textForDetection = filteredText.length > 50 ? filteredText : text;
 
     // 1. 本地评分（使用过滤后的文本）
+    callbacks?.onProgress?.('正在进行本地特征分析...');
     const stats = analyzeStatistics(textForDetection);
     const topo = analyzeTopology(textForDetection);
     const localScore = Math.round(stats.overallScore * LOCAL_WEIGHTS.stats + topo.overallScore * LOCAL_WEIGHTS.topo);
     const perplexity = 0;
+    
+    // 发送本地特征分析完成消息
+    const localSignals: string[] = [];
+    if (stats.overallScore > 60) localSignals.push('AI关键词密度高');
+    if (topo.overallScore > 60) localSignals.push('结构过于规整');
+    if (stats.sentenceLengthVariance < 30) localSignals.push('句长过于均匀');
+    if (stats.lexicalDiversity < 40) localSignals.push('词汇多样性低');
+    if (localSignals.length === 0) localSignals.push('无明显AI特征');
+    
+    callbacks?.onUpdate?.('localAnalysis', {
+      localScore,
+      signals: localSignals
+    });
+
+    // 立即发送统计特征（本地计算）
+    callbacks?.onUpdate?.('statistics', {
+      sentenceLengthVariance: Math.round(stats.sentenceLengthVariance),
+      lexicalDiversity: Math.round(stats.lexicalDiversity),
+      punctuationScore: Math.round(stats.punctuationScore)
+    });
+
+    // 立即计算并发送AI来源识别（本地计算）
+    const sourceIdentification = enableSourceIdentification 
+      ? identifyAISource(textForDetection) 
+      : undefined;
+    if (sourceIdentification) {
+      callbacks?.onUpdate?.('sources', sourceIdentification);
+    }
+
+    // 立即发送模型检测结果框架（模型名称，评价和信号待填充）
+    const modelConfig = getModelConfig(modelId);
+    callbacks?.onUpdate?.('modelResults', {
+      modelResults: [{
+        modelId,
+        modelName: modelConfig?.name || modelId,
+        aiProbability: 0,  // 待填充
+        reason: '',  // 待填充
+        signals: []  // 待填充
+      }]
+    });
 
     // 2. 段落级检测（核心检测）
-    console.log('[检测] 调用段落检测...');
-    
+    callbacks?.onProgress?.('正在进行段落级检测...');
     const paragraphResults = enableParagraphDetection && normalSentences.length > 0
       ? await detectParagraphs(text, [modelId], {
-          preFilteredSentences: normalSentences as SentenceInfo[]
+          preFilteredSentences: normalSentences as SentenceInfo[],
+          callbacks  // 传递回调
         }).catch(error => {
-          console.error('[检测] 段落级检测失败:', error);
-          return undefined;
+          console.error('模型检测失败: 模型不可用，请更换模型重试。');
+          callbacks?.onError?.('模型检测失败: 模型不可用，请更换模型重试。');
+          throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
         })
       : undefined;
+    
+    // 发送进度：段落检测完成
+    if (paragraphResults) {
+      callbacks?.onProgress?.(`段落检测完成，共 ${paragraphResults.length} 个段落`);
+      
+      // 发送每个段落结果
+      paragraphResults.forEach((para, idx) => {
+        callbacks?.onParagraph?.(idx, para);
+        // 同时发送 update 消息
+        callbacks?.onUpdate?.('paragraph', {
+          index: idx,
+          data: para
+        });
+      });
+    }
 
     // 3. 基于段落检测结果，调用模型进行综合分析
     let modelScore: number;
@@ -909,12 +1069,14 @@ export async function detectAIContent(
     let modelSuggestions: string[];
 
     if (paragraphResults && paragraphResults.length > 0) {
-      // 调用模型综合分析段落检测结果和原文
-      console.log('[检测] 调用模型综合分析段落检测结果...');
+      // 发送进度：综合分析
+      callbacks?.onProgress?.('正在进行综合分析...');
       
-      const overallResult = await callModelOverallAnalysis(textForDetection, paragraphResults, modelId).catch(error => {
-        console.error('[检测] 综合分析失败:', error);
-        return null;
+      // 调用模型综合分析段落检测结果和原文
+      const overallResult = await callModelOverallAnalysis(textForDetection, paragraphResults, modelId, callbacks).catch(error => {
+        console.error('模型检测失败: 模型不可用，请更换模型重试。');
+        callbacks?.onError?.('模型检测失败: 模型不可用，请更换模型重试。');
+        throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
       });
       
       if (overallResult) {
@@ -922,54 +1084,25 @@ export async function detectAIContent(
         modelReason = overallResult.reason;
         modelSignals = overallResult.signals || [];
         modelSuggestions = overallResult.suggestions || [];
-        console.log(`[检测] 综合分析完成，模型评分 ${modelScore}`);
+        callbacks?.onProgress?.('综合分析完成');
+        
+        // 发送模型评价
+        callbacks?.onUpdate?.('evaluation', {
+          text: modelReason
+        });
       } else {
-        // 综合分析失败，使用段落平均分
-        const scores = paragraphResults
-          .filter(r => !r.skipped)
-          .map(r => r.aiProbability);
-        
-        modelScore = scores.length > 0
-          ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
-          : 50;
-        
-        const reasons = paragraphResults
-          .filter(r => r.reason && !r.skipped)
-          .map(r => r.reason)
-          .slice(0, 3);
-        
-        modelReason = reasons.length > 0
-          ? reasons.join('；')
-          : '基于段落分析';
-        
-        const allSignals = new Set<string>();
-        paragraphResults.forEach(r => {
-          if (r.signals && !r.skipped) {
-            r.signals.forEach(s => allSignals.add(s));
-          }
-        });
-        modelSignals = Array.from(allSignals).slice(0, 5);
-        
-        const allSuggestions = new Set<string>();
-        paragraphResults.forEach(r => {
-          if (r.suggestions && !r.skipped) {
-            r.suggestions.forEach(s => allSuggestions.add(s));
-          }
-        });
-        modelSuggestions = Array.from(allSuggestions).slice(0, 3);
-        
-        console.log(`[检测] 综合分析失败，使用段落平均分 ${modelScore}`);
+        console.error('模型检测失败: 模型不可用，请更换模型重试。');
+        callbacks?.onError?.('模型检测失败: 模型不可用，请更换模型重试。');
+        throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
       }
     } else {
-      // 段落检测失败，使用本地评分
-      modelScore = localScore;
-      modelReason = '段落检测失败，使用本地评分';
-      modelSignals = [];
-      modelSuggestions = [];
+      // 段落检测失败，直接返回错误
+      console.error('模型检测失败: 模型不可用，请更换模型重试。');
+      callbacks?.onError?.('模型检测失败: 模型不可用，请更换模型重试。');
+      throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
     }
 
     // 4. 构造 modelResults
-    const modelConfig = getModelConfig(modelId);
     const modelResults: ModelResult[] = [{
       modelId,
       modelName: modelConfig?.name || modelId,
@@ -978,6 +1111,11 @@ export async function detectAIContent(
       reason: modelReason,
       signals: modelSignals
     }];
+    
+    // 发送模型检测结果更新
+    callbacks?.onUpdate?.('modelResults', {
+      modelResults
+    });
 
     // 5. 一致性纠偏综合评分
     const aiProbability = reconcileScore(modelScore, localScore, stats);
@@ -991,34 +1129,37 @@ export async function detectAIContent(
     } else {
       confidence = 'low';
     }
-    console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${modelScore} = 综合评分 ${aiProbability}% (${modelReason})`);
 
     // 6. 置信区间
     const confidenceInterval = calculateConfidenceInterval(aiProbability, 1);
+    
+    // 发送评分更新
+    callbacks?.onUpdate?.('score', {
+      aiProbability,
+      confidence: confidence === 'high' ? '高' : confidence === 'medium' ? '中' : '低',
+      confidenceInterval: `${confidenceInterval.lower}%-${confidenceInterval.upper}%`
+    });
 
     // 7. 生成分析说明
     const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, modelScore);
 
-    // 8. AI来源识别（可选，使用过滤后的文本）
-    let sourceIdentification;
-    if (enableSourceIdentification) {
-      sourceIdentification = identifyAISource(textForDetection);
-    }
-
-    // 9. 修改建议（可选，从段落检测结果中综合）
+    // 8. 修改建议（可选，从段落检测结果中综合）
     let suggestions: string[] | undefined;
     if (enableSuggestions && modelSuggestions.length > 0) {
       suggestions = modelSuggestions;
+      // 发送建议更新
+      callbacks?.onUpdate?.('suggestions', {
+        items: suggestions
+      });
     }
 
-    console.log(`[检测] 完成, AI概率: ${aiProbability}%`);
-
-    return {
+    // 构造最终结果
+    const result: DetectionResult = {
       aiProbability,
       perplexity,
       modelScore,
       localScore,
-      confidence,
+      confidence: confidence === 'high' ? '高' : confidence === 'medium' ? '中' : '低',
       confidenceInterval,
       statistics: {
         sentenceLengthVariance: stats.sentenceLengthVariance,
@@ -1033,9 +1174,14 @@ export async function detectAIContent(
       contentLength: text.length,
       source: 'text'
     };
+
+    // 发送完成回调
+    callbacks?.onComplete?.(result);
+
+    return result;
   } catch (error) {
-    console.error('[检测] 检测失败:', error);
-    throw error;
+    console.error('模型检测失败: 模型不可用，请更换模型重试。');
+    throw new Error('模型检测失败: 模型不可用，请更换模型重试。');
   }
 }
 

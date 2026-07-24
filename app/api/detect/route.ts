@@ -63,20 +63,69 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // 执行检测 - 默认开启所有功能
-    const result = await detectAIContent(content, {
-      enableParagraphDetection: true,      // 默认开启
-      enableSourceIdentification: true,    // 默认开启
-      enableSuggestions: true,             // 默认开启
-      modelId                              // 使用指定模型（可选）
+    // 创建流式响应
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+
+        // 定义发送消息的辅助函数
+        const send = (type: string, data: any) => {
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`));
+          } catch (error) {
+            console.error('发送消息失败:', error);
+          }
+        };
+
+        try {
+          // 执行检测 - 默认开启所有功能，传入回调
+          const result = await detectAIContent(content, {
+            enableParagraphDetection: true,      // 默认开启
+            enableSourceIdentification: true,    // 默认开启
+            enableSuggestions: true,             // 默认开启
+            modelId,                              // 使用指定模型（可选）
+            callbacks: {
+              onProgress: (message) => {
+                send('progress', { message });
+              },
+              onStream: (chunk, fullContent) => {
+                send('stream', { chunk, fullContent });
+              },
+              onUpdate: (type, data) => {
+                send('update', { updateType: type, data });
+              },
+              onParagraph: (index, data) => {
+                send('paragraph', { index, data });
+              },
+              onComplete: (result) => {
+                send('complete', {
+                  data: {
+                    ...result,
+                    contentLength: content.length,
+                    source: url ? 'url' : 'text'
+                  }
+                });
+              },
+              onError: (error) => {
+                send('error', { message: error });
+              }
+            }
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '检测失败，请稍后重试';
+          send('error', { message });
+        } finally {
+          controller.close();
+        }
+      }
     });
 
-    return NextResponse.json({
-      success: true,
-      data: {
-        ...result,
-        contentLength: content.length,
-        source: url ? 'url' : 'text'
+    // 返回流式响应
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
       }
     });
   } catch (error) {

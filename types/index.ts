@@ -4,7 +4,7 @@ export interface DetectionResult {
   perplexity: number;           // 困惑度（已弃用，保留兼容）
   modelScore?: number;          // 模型深度判断评分 (0-100)
   localScore?: number;          // 本地综合评分 (0-100)
-  confidence: 'high' | 'medium' | 'low';  // 置信度
+  confidence: 'high' | 'medium' | 'low' | '高' | '中' | '低';  // 置信度
   confidenceInterval: {
     lower: number;  // 置信区间下限
     upper: number;  // 置信区间上限
