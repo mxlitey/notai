@@ -339,12 +339,54 @@ export default function Home() {
         logging: false,
       });
       
-      // 转换为图片并下载
-      const image = canvas.toDataURL('image/png');
-      const link = document.createElement('a');
-      link.href = image;
-      link.download = `notai-检测报告-${new Date().getTime()}.png`;
-      link.click();
+      // iOS Safari 不支持 download 属性，使用 Web Share API
+      if (navigator.share && navigator.canShare) {
+        // 转换为 Blob
+        const blob = await new Promise<Blob>((resolve) => {
+          canvas.toBlob((b) => resolve(b!), 'image/png');
+        });
+        
+        // 创建 File 对象（用于分享）
+        const file = new File([blob], `notai-检测报告-${Date.now()}.png`, { type: 'image/png' });
+        
+        // 尝试分享
+        try {
+          await navigator.share({
+            files: [file],
+            title: 'AI检测报告',
+            text: '查看我的AI检测结果'
+          });
+        } catch (shareError) {
+          // 用户取消分享或其他错误，降级到新窗口打开
+          console.log('分享失败，使用新窗口打开');
+          const image = canvas.toDataURL('image/png');
+          const newWindow = window.open();
+          if (newWindow) {
+            newWindow.document.write(`<img src="${image}" style="max-width: 100%;">`);
+            newWindow.document.title = 'AI检测报告 - 长按保存';
+          }
+        }
+      } else {
+        // 不支持 Web Share API，使用传统下载或新窗口打开
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        
+        if (isIOS) {
+          // iOS 设备但不支持分享，新窗口打开
+          const image = canvas.toDataURL('image/png');
+          const newWindow = window.open();
+          if (newWindow) {
+            newWindow.document.write(`<img src="${image}" style="max-width: 100%;">`);
+            newWindow.document.title = 'AI检测报告 - 长按保存';
+          }
+        } else {
+          // 非 iOS 设备，使用传统下载
+          const image = canvas.toDataURL('image/png');
+          const link = document.createElement('a');
+          link.href = image;
+          link.download = `notai-检测报告-${new Date().getTime()}.png`;
+          link.click();
+        }
+      }
     } catch (err) {
       console.error('生成图片失败:', err);
       alert('生成图片失败，请稍后重试');
