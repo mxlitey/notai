@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectAIContent } from '@/lib/detect';
 import { fetchArticleFromUrl, isValidUrl } from '@/lib/fetch';
-import { isValidModel, AVAILABLE_MODELS } from '@/lib/models';
+import { AVAILABLE_MODELS } from '@/lib/models';
 
 // 公开API - 通过API Key认证
 export async function POST(request: NextRequest) {
@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { text, url, models, enable_paragraph_detection, enable_source_identification, enable_suggestions } = body;
+    const { text, url, enable_paragraph_detection, enable_source_identification, enable_suggestions } = body;
 
     let content = '';
 
@@ -62,18 +62,8 @@ export async function POST(request: NextRequest) {
       content = content.substring(0, 10000);
     }
 
-    // 验证模型
-    let selectedModels = ['deepseek-v4-flash'];
-    if (models && Array.isArray(models) && models.length > 0) {
-      const validModels = models.filter(m => isValidModel(m));
-      if (validModels.length > 0) {
-        selectedModels = validModels;
-      }
-    }
-
     // 执行检测
     const result = await detectAIContent(content, {
-      models: selectedModels,
       enableParagraphDetection: enable_paragraph_detection === true,
       enableSourceIdentification: enable_source_identification === true,
       enableSuggestions: enable_suggestions === true
@@ -129,7 +119,6 @@ export async function GET() {
         parameters: {
           text: '文本内容（与url二选一）',
           url: '文章链接（与text二选一）',
-          models: `模型ID数组，可选值: ${models.map(m => m.id).join(', ')}`,
           enable_paragraph_detection: '是否启用段落级检测',
           enable_source_identification: '是否启用AI来源识别',
           enable_suggestions: '是否生成修改建议'

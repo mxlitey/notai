@@ -34,7 +34,6 @@ interface ModelPromptResult {
   reason: string;
   signals: string[];
   suggestions: string[];
-  degraded: boolean;
 }
 
 // 剥 markdown 代码围栏
@@ -88,47 +87,14 @@ function parseModelJson(content: string): { score: number; reason: string; signa
     };
   }
 
-  // Step 4: 从推理过程的结尾部分提取评分（处理 DeepSeek 推理模型）
-  // 推理模型通常在最后给出结论，所以检查最后 500 字符
-  const lastPart = cleaned.slice(-500);
-  
-  // 尝试匹配 "答案是X"、"评分为X"、"分数是X"、"最终评分X" 等模式
-  const conclusionPatterns = [
-    /(?:答案|评分|分数|最终评分|结论)[是为：:\s]*(\d{1,3})/i,
-    /(?:score)[：:\s]*(\d{1,3})/i,
-    /(\d{1,3})\s*(?:分|%\s*|左右)/,
-  ];
-  
-  for (const pattern of conclusionPatterns) {
-    const match = lastPart.match(pattern);
-    if (match && parseInt(match[1], 10) >= 0 && parseInt(match[1], 10) <= 100) {
-      console.log(`[Prompt检测] 从推理过程提取评分: ${match[1]}`);
-      return { score: parseInt(match[1], 10), reason: '推理模型输出', signals: [], suggestions: [] };
-    }
-  }
-  
-  // Step 5: 兜底——取最后一个出现的 0-100 范围内的数字
-  const allNumbers = cleaned.match(/\b\d{1,3}\b/g);
-  if (allNumbers) {
-    // 从后往前找，优先找最后出现的 0-100 范围内的数字
-    for (let i = allNumbers.length - 1; i >= 0; i--) {
-      const num = parseInt(allNumbers[i], 10);
-      if (num >= 0 && num <= 100) {
-        console.log(`[Prompt检测] 兜底提取最后一个数字: ${num}`);
-        return { score: num, reason: '推理模型输出（兜底）', signals: [], suggestions: [] };
-      }
-    }
-  }
-
   return null;
 }
 
 // Prompt 模型判断 - 调用AI让模型判断文本是否AI生成（结构化 JSON 输出）
 async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Promise<ModelPromptResult> {
   if (!API_KEY) {
-    console.warn('[Prompt检测] API_KEY未配置，降级为本地检测');
-    const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: 'API未配置', signals: [], suggestions: [], degraded: true };
+    console.error('[Prompt检测] API_KEY未配置');
+    throw new Error('API_KEY未配置，无法进行检测');
   }
 
   // 全文输入，不截断
@@ -182,7 +148,7 @@ ${text}`;
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 1500,  // 增加到 1500，给推理模型足够的输出空间
+    max_tokens: 1500,  // 输出完整 JSON 需要
     temperature: 0.1,
     response_format: { type: 'json_object' }
   };
@@ -216,48 +182,34 @@ ${text}`;
         errorDetail = errData.error?.message || JSON.stringify(errData);
       } catch { /* ignore */ }
       console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
-      const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: `API请求失败:${response.status}`, signals: [], suggestions: [], degraded: true };
+      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
     }
 
     const data = await response.json();
-    // 某些模型（如 DeepSeek 推理模型）会把回答放到 reasoning_content 字段
-    let content = data.choices?.[0]?.message?.content || '';
-    const reasoningContent = data.choices?.[0]?.message?.reasoning_content || '';
-    
-    // 如果 content 为空但 reasoning_content 有内容，使用 reasoning_content
-    if (!content && reasoningContent) {
-      console.log(`[Prompt检测] 模型 ${modelId} content 为空，使用 reasoning_content`);
-      content = reasoningContent;
-    }
+    const content = data.choices?.[0]?.message?.content || '';
     
     // 打印完整响应用于调试
     if (!content) {
-      console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
-      // 空内容降级到本地
-      const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: '模型返回空内容', signals: [], suggestions: [], degraded: true };
+      console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
+      throw new Error('模型返回空内容');
     }
     
-    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
+    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content}`);
 
     const parsed = parseModelJson(content);
     if (parsed === null) {
-      const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: '无法解析评分', signals: [], suggestions: [], degraded: true };
+      throw new Error('无法解析模型返回的评分');
     }
 
     return {
       aiProbability: clamp(parsed.score, 0, 100),
       reason: parsed.reason || '模型判断',
       signals: parsed.signals,
-      suggestions: parsed.suggestions,
-      degraded: false
+      suggestions: parsed.suggestions
     };
   } catch (error) {
     console.error('[Prompt检测] 异常:', error);
-    const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: '调用异常', signals: [], suggestions: [], degraded: true };
+    throw error;
   }
 }
 
@@ -429,8 +381,8 @@ ${fragments}`;
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    // 推理模型需要更多 tokens：每个片段约 200 tokens + 推理空间 1500 tokens
-    max_tokens: Math.min(4000, 200 * chunks.length + 1500),
+    // 每个片段约 200 tokens + 基础空间 1000 tokens
+    max_tokens: Math.min(4000, 200 * chunks.length + 1000),
     temperature: 0.1,
     response_format: { type: 'json_object' }
   };
@@ -467,22 +419,14 @@ ${fragments}`;
     }
 
     const data = await response.json();
-    // 某些模型（如 DeepSeek 推理模型）会把回答放到 reasoning_content 字段
-    let content = data.choices?.[0]?.message?.content || '';
-    const reasoningContent = data.choices?.[0]?.message?.reasoning_content || '';
-    
-    // 如果 content 为空但 reasoning_content 有内容，使用 reasoning_content
-    if (!content && reasoningContent) {
-      console.log(`[段落检测] 模型 ${modelId} content 为空，使用 reasoning_content`);
-      content = reasoningContent;
-    }
+    const content = data.choices?.[0]?.message?.content || '';
     
     // 打印完整响应用于调试
     if (!content) {
-      console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
-      return new Map();
+      console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
+      throw new Error('模型返回空内容');
     }
-    console.log(`[段落检测] 模型 ${modelId} 返回: ${content.substring(0, 300)}`);
+    console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
 
     return parseBatchResponse(content);
   } catch (error) {
@@ -508,16 +452,8 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
   }
 
   if (sentences.length === 0) {
-    // 无法分割，直接返回整体
-    const { aiProbability } = detectLocal(text);
-    return [{
-      paragraph: text,
-      startIndex: 0,
-      endIndex: text.length,
-      aiProbability,
-      isAI: aiProbability > 60,
-      suggestions: []
-    }];
+    // 无法分割，抛出错误
+    throw new Error('无法分割文本进行段落检测');
   }
 
   // 每5句一组，最多8片段，单片段300字上限
@@ -538,73 +474,29 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 多模型并行调用
-  console.log(`[段落检测] 调用 ${modelList.length} 个模型并行检测...`);
-  const allResults = await Promise.all(
-    modelList.map(modelId => callBatchParagraphModel(chunks, modelId))
-  );
+  // 调用单个模型
+  console.log(`[段落检测] 调用模型 ${modelList[0]} 检测...`);
+  const batchResult = await callBatchParagraphModel(chunks, modelList[0]);
 
-  // 统计成功的模型数
-  const successCount = allResults.filter(r => r.size > 0).length;
-  console.log(`[段落检测] 成功模型: ${successCount}/${modelList.length}`);
+  // 检查是否所有片段都有结果
+  const missingChunks = chunks.filter(ch => !batchResult.has(ch.index));
+  if (missingChunks.length > 0) {
+    console.error(`[段落检测] 部分片段未返回结果: ${missingChunks.map(c => c.index).join(', ')}`);
+    throw new Error(`部分片段检测失败，请重试`);
+  }
 
-  // 组装结果（多模型取平均，缺失片段降级到本地）
+  // 组装结果
   return chunks.map(ch => {
-    // 收集所有成功模型的评分、reason、suggestions
-    const scores: number[] = [];
-    let firstReason = '';
-    let firstSuggestions: string[] = [];
-    
-    // 收集各模型的独立结果
-    const modelResults: { modelId: string; modelName: string; score: number; reason: string; suggestions: string[] }[] = [];
-    
-    for (let i = 0; i < allResults.length; i++) {
-      const batchResult = allResults[i];
-      const modelId = modelList[i];
-      const modelConfig = getModelConfig(modelId);
-      const r = batchResult.get(ch.index);
-      
-      if (r) {
-        scores.push(r.score);
-        if (!firstReason) firstReason = r.reason;
-        if (firstSuggestions.length === 0) firstSuggestions = r.suggestions;
-        
-        // 添加到 modelResults
-        modelResults.push({
-          modelId,
-          modelName: modelConfig?.name || modelId,
-          score: r.score,
-          reason: r.reason,
-          suggestions: r.suggestions
-        });
-      }
-    }
-    
-    // 计算平均评分
-    let ai: number;
-    let reason: string;
-    let suggestions: string[];
-    
-    if (scores.length > 0) {
-      ai = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
-      reason = firstReason || '多模型平均';
-      suggestions = firstSuggestions;
-    } else {
-      // 所有模型都失败，降级到本地
-      ai = detectLocal(ch.text).aiProbability;
-      reason = '本地降级';
-      suggestions = [];
-    }
+    const r = batchResult.get(ch.index)!;
     
     return {
       paragraph: ch.text,
       startIndex: ch.start,
       endIndex: ch.end,
-      aiProbability: ai,
-      isAI: ai > 60,
-      reason,
-      suggestions,
-      modelResults
+      aiProbability: r.score,
+      isAI: r.score > 60,
+      reason: r.reason || '模型判断',
+      suggestions: r.suggestions
     };
   });
 }
@@ -669,64 +561,45 @@ export function calculateConfidenceInterval(aiProbability: number, samples: numb
 export async function detectAIContent(
   text: string,
   options: {
-    models?: string[];
     enableParagraphDetection?: boolean;
     enableSourceIdentification?: boolean;
     enableSuggestions?: boolean;
   } = {}
 ): Promise<DetectionResult> {
   const {
-    models = ['deepseek-v4-flash'],
     enableParagraphDetection = false,
     enableSourceIdentification = false,
     enableSuggestions = false
   } = options;
 
-  console.log('[检测] 开始检测, 模型:', models);
+  const modelId = PROMPT_MODEL;
+  console.log('[检测] 开始检测, 模型:', modelId);
 
   try {
-    // 1. 本地评分（一次性，所有模型共用）
+    // 1. 本地评分
     const stats = analyzeStatistics(text);
     const topo = analyzeTopology(text);
     const localScore = Math.round(stats.overallScore * LOCAL_WEIGHTS.stats + topo.overallScore * LOCAL_WEIGHTS.topo);
     const perplexity = 0;
 
-    // 2. 真实多模型并行调用
+    // 2. 调用模型深度判断
     console.log('[检测] 调用模型深度判断...');
-    const promptModels = models.length > 0 ? models : [PROMPT_MODEL];
-    const promptResults = await Promise.all(
-      promptModels.map(m => callModelPrompt(text, m))
-    );
+    const promptResult = await callModelPrompt(text, modelId);
 
-    // 3. 构造 modelResults（真实分数 + 依据 + 降级标记）
-    const modelResults: ModelResult[] = promptResults.map((r, i) => {
-      const cfg = getModelConfig(promptModels[i]);
-      return {
-        modelId: promptModels[i],
-        modelName: cfg?.name || promptModels[i],
-        aiProbability: r.aiProbability,
-        perplexity: 0,
-        reason: r.reason,
-        signals: r.signals,
-        degraded: r.degraded
-      };
-    });
+    // 3. 构造 modelResults
+    const modelConfig = getModelConfig(modelId);
+    const modelResults: ModelResult[] = [{
+      modelId,
+      modelName: modelConfig?.name || modelId,
+      aiProbability: promptResult.aiProbability,
+      perplexity: 0,
+      reason: promptResult.reason,
+      signals: promptResult.signals
+    }];
 
-    // 4. 只对未降级模型取平均作为 promptScore
-    // 全部降级时用保守值 50（不确定），而不是 localScore（避免本地评分偏高误判）
-    const validResults = promptResults.filter(r => !r.degraded);
-    const allDegraded = validResults.length === 0;
-    
-    const promptScore = validResults.length > 0
-      ? Math.round(validResults.reduce((s, r) => s + r.aiProbability, 0) / validResults.length)
-      : 50;  // 全部降级时用保守值
-    
-    const promptReason = validResults[0]?.reason || (allDegraded ? '全部模型降级' : '本地降级');
-    
-    // 如果全部模型降级，降低置信度并打印警告
-    if (allDegraded) {
-      console.warn(`[检测] 警告：全部模型降级，使用保守评分 50，本地评分为 ${localScore}`);
-    }
+    // 4. 计算综合评分
+    const promptScore = promptResult.aiProbability;
+    const promptReason = promptResult.reason || '模型判断';
 
     // 5. 一致性纠偏综合评分
     const aiProbability = reconcileScore(promptScore, localScore, stats);
@@ -742,30 +615,17 @@ export async function detectAIContent(
     }
     console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${promptScore} = 综合评分 ${aiProbability}% (${promptReason})`);
 
-    // 6. 置信区间（样本数=成功返回的模型数）
-    const confidenceInterval = calculateConfidenceInterval(aiProbability, Math.max(1, validResults.length));
+    // 6. 置信区间
+    const confidenceInterval = calculateConfidenceInterval(aiProbability, 1);
 
     // 7. 生成分析说明
     const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, promptScore);
 
     // 8. 段落级检测（可选）
-    // 使用所有成功的模型进行段落检测
     let paragraphResults: ParagraphResult[] | undefined;
     if (enableParagraphDetection && text.length > 200) {
       try {
-        // 收集所有成功模型的 ID
-        const successModelIds: string[] = [];
-        promptResults.forEach((r, i) => {
-          if (!r.degraded) {
-            successModelIds.push(promptModels[i]);
-          }
-        });
-        
-        // 如果没有成功的模型，用第一个模型尝试（可能降级）
-        const modelsToUse = successModelIds.length > 0 ? successModelIds : [models[0] || PROMPT_MODEL];
-        
-        console.log(`[段落检测] 使用 ${successModelIds.length}/${promptModels.length} 个成功模型`);
-        paragraphResults = await detectParagraphs(text, modelsToUse);
+        paragraphResults = await detectParagraphs(text, [modelId]);
       } catch (error) {
         console.error('[检测] 段落级检测失败:', error);
       }
@@ -780,8 +640,7 @@ export async function detectAIContent(
     // 10. 修改建议（可选，从模型返回中获取）
     let suggestions: string[] | undefined;
     if (enableSuggestions) {
-      // 取第一个成功模型的 suggestions
-      suggestions = validResults[0]?.suggestions;
+      suggestions = promptResult.suggestions;
     }
 
     console.log(`[检测] 完成, AI概率: ${aiProbability}%`);
@@ -837,8 +696,7 @@ function generateAnalysis(
   if (modelResults.length > 1) {
     lines.push(`\n**多模型检测结果**：`);
     modelResults.forEach(r => {
-      const tag = r.degraded ? '（已降级到本地）' : '';
-      lines.push(`- ${r.modelName}: ${r.aiProbability}% AI概率${tag}`);
+      lines.push(`- ${r.modelName}: ${r.aiProbability}% AI概率`);
     });
   }
 

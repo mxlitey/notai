@@ -2,14 +2,6 @@
 
 import { useState, useEffect } from 'react';
 
-// 模型配置类型
-interface ModelConfig {
-  id: string;
-  name: string;
-  isFree: boolean;
-  supportsLogprobs: boolean;
-}
-
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [token, setToken] = useState('');
@@ -20,25 +12,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
-
-  // 模型列表（从API获取）
-  const [models, setModels] = useState<ModelConfig[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
-
-  // 获取模型列表
-  useEffect(() => {
-    fetch('/api/models')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.data) {
-          setModels(data.data);
-          if (data.data.length > 0) {
-            setSelectedModels([data.data[0].id]);
-          }
-        }
-      })
-      .catch(err => console.error('获取模型列表失败:', err));
-  }, []);
 
   // 检查本地缓存的token
   useEffect(() => {
@@ -104,17 +77,6 @@ export default function Home() {
     setResult(null);
   };
 
-  // 切换模型选择
-  const toggleModel = (modelId: string) => {
-    if (selectedModels.includes(modelId)) {
-      if (selectedModels.length > 1) {
-        setSelectedModels(selectedModels.filter(m => m !== modelId));
-      }
-    } else {
-      setSelectedModels([...selectedModels, modelId]);
-    }
-  };
-
   // 检测
   const handleDetect = async () => {
     setLoading(true);
@@ -122,8 +84,8 @@ export default function Home() {
     setResult(null);
 
     const body = inputMode === 'url'
-      ? { url, token, models: selectedModels }
-      : { text, token, models: selectedModels };
+      ? { url, token }
+      : { text, token };
 
     try {
       const res = await fetch('/api/detect', {
@@ -239,40 +201,12 @@ export default function Home() {
           )}
         </div>
 
-        {/* 模型选择 */}
-        <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-          <h3 className="font-semibold mb-4">选择检测模型（可多选）</h3>
-          {models.length === 0 ? (
-            <div className="text-gray-500">加载模型列表...</div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-              {models.map(model => (
-                <label
-                  key={model.id}
-                  className={`flex items-center p-3 border rounded-lg cursor-pointer transition-colors ${selectedModels.includes(model.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedModels.includes(model.id)}
-                    onChange={() => toggleModel(model.id)}
-                    className="mr-3"
-                  />
-                  <div className="font-medium">
-                      {model.name}
-                      {model.isFree && <span className="ml-2 text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">免费</span>}
-                    </div>
-                </label>
-              ))}
-            </div>
-          )}
-        </div>
-
         {error && <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">{error}</div>}
 
         <div className="flex justify-center mb-8">
           <button
             onClick={handleDetect}
-            disabled={loading || (inputMode === 'text' ? text.length < 50 : !url) || selectedModels.length === 0}
+            disabled={loading || (inputMode === 'text' ? text.length < 50 : !url)}
             className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             {loading ? '检测中...' : '开始检测'}
@@ -311,22 +245,18 @@ export default function Home() {
             {/* 模型检测结果 */}
             {result.modelResults && result.modelResults.length > 0 && (
               <div className="mb-6">
-                <h3 className="font-semibold mb-3">{result.modelResults.length > 1 ? '多模型检测结果' : '模型检测结果'}</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {result.modelResults.map((mr: any) => (
-                    <div key={mr.modelId} className="flex justify-between items-center p-3 bg-gray-50 rounded">
-                      <div>
-                        <div className="font-medium">{mr.modelName}</div>
-                        <div className="text-xs text-gray-500">模型评分</div>
-                        {mr.reason && <div className="text-xs text-gray-400 mt-1 break-all">{mr.reason}</div>}
-                        {mr.degraded && <div className="text-xs text-orange-500 mt-1">（已降级到本地）</div>}
-                      </div>
-                      <div className={`text-lg font-bold ${mr.aiProbability > 70 ? 'text-red-600' : mr.aiProbability > 50 ? 'text-orange-500' : 'text-green-600'}`}>
+                <h3 className="font-semibold mb-3">模型检测结果</h3>
+                {result.modelResults.map((mr: any) => (
+                  <div key={mr.modelId} className="p-4 bg-gray-50 rounded-lg">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="font-medium">{mr.modelName}</span>
+                      <span className={`text-2xl font-bold ${mr.aiProbability > 70 ? 'text-red-600' : mr.aiProbability > 50 ? 'text-orange-500' : 'text-green-600'}`}>
                         {mr.aiProbability}%
-                      </div>
+                      </span>
                     </div>
-                  ))}
-                </div>
+                    {mr.reason && <div className="text-sm text-gray-600 break-all">{mr.reason}</div>}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -418,60 +348,25 @@ export default function Home() {
                         <div className="p-2 bg-white bg-opacity-60 rounded text-gray-700">{p.paragraph}</div>
                       </div>
 
-                      {/* 多模型结果 */}
-                      {p.modelResults && p.modelResults.length > 1 ? (
+                      {/* 模型评价 */}
+                      {p.reason && (
                         <div className="mb-3">
-                          <div className="text-xs text-gray-500 mb-2">各模型检测结果：</div>
-                          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(p.modelResults.length, 2)}, 1fr)` }}>
-                            {p.modelResults.map((mr: { modelId: string; modelName: string; score: number; reason: string; suggestions: string[] }, idx: number) => (
-                              <div key={idx} className="p-3 bg-white bg-opacity-80 rounded-lg border">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-sm font-medium">{mr.modelName}</span>
-                                  <span className={`text-lg font-bold ${
-                                    mr.score >= 70 ? 'text-red-600' :
-                                    mr.score >= 50 ? 'text-yellow-600' :
-                                    'text-green-600'
-                                  }`}>
-                                    {mr.score}%
-                                  </span>
-                                </div>
-                                {mr.reason && (
-                                  <div className="text-xs text-gray-600 mb-2">{mr.reason}</div>
-                                )}
-                                {mr.suggestions && mr.suggestions.length > 0 && (
-                                  <div className="text-xs text-gray-500">
-                                    建议：{mr.suggestions.join('；')}
-                                  </div>
-                                )}
-                              </div>
-                            ))}
-                          </div>
+                          <div className="text-xs text-gray-500 mb-1">模型评价：</div>
+                          <div className="text-sm text-gray-600">{p.reason}</div>
                         </div>
-                      ) : (
-                        <>
-                          {/* 单模型评价 */}
-                          {p.reason && (
-                            <div className="mb-3">
-                              <div className="text-xs text-gray-500 mb-1">模型评价：</div>
-                              <div className="p-2 bg-blue-50 bg-opacity-60 rounded text-gray-700 text-sm">{p.reason}</div>
-                            </div>
-                          )}
-
-                          {/* 单模型修改建议 */}
-                          {p.suggestions && p.suggestions.length > 0 && (
-                            <div className="mb-3">
-                              <div className="text-xs text-gray-500 mb-1">修改建议：</div>
-                              <ul className="text-sm text-gray-600 space-y-1">
-                                {p.suggestions.map((s: string, j: number) => (
-                                  <li key={j}>{s}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </>
                       )}
 
-                      
+                      {/* 修改建议 */}
+                      {p.suggestions && p.suggestions.length > 0 && (
+                        <div className="mb-3">
+                          <div className="text-xs text-gray-500 mb-1">修改建议：</div>
+                          <ul className="text-sm text-gray-600 space-y-1">
+                            {p.suggestions.map((s: string, j: number) => (
+                              <li key={j}>{s}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

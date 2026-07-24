@@ -45,13 +45,3 @@ export const AVAILABLE_MODELS: ModelConfig[] = parseModelsFromEnv();
 export function getModelConfig(modelId: string): ModelConfig | undefined {
   return AVAILABLE_MODELS.find(m => m.id === modelId);
 }
-
-// 验证模型ID
-export function isValidModel(modelId: string): boolean {
-  return AVAILABLE_MODELS.some(m => m.id === modelId);
-}
-
-// 获取所有模型ID列表
-export function getModelIds(): string[] {
-  return AVAILABLE_MODELS.map(m => m.id);
-}

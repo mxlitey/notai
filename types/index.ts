@@ -35,24 +35,14 @@ export interface ParagraphResult {
   paragraph: string;      // 段落内容
   startIndex: number;     // 起始位置
   endIndex: number;       // 结束位置
-  aiProbability: number;  // AI概率（多模型平均）
+  aiProbability: number;  // AI概率
   isAI: boolean;          // 是否为AI生成
-  reason?: string;        // 模型给出的评价（第一个成功模型的）
-  suggestions?: string[]; // 针对该段的修改建议（第一个成功模型的）
+  reason?: string;        // 模型给出的评价
+  suggestions?: string[]; // 针对该段的修改建议
   modifiedText?: string;  // 修改后的文本示例
-  modelResults?: ParagraphModelResult[];  // 各模型的独立结果
 }
 
-// 段落级多模型检测结果
-export interface ParagraphModelResult {
-  modelId: string;
-  modelName: string;
-  score: number;
-  reason: string;
-  suggestions: string[];
-}
-
-// 多模型检测结果
+// 模型检测结果
 export interface ModelResult {
   modelId: string;
   modelName: string;
@@ -60,7 +50,6 @@ export interface ModelResult {
   perplexity: number;
   reason?: string;      // 模型给出的判定依据
   signals?: string[];   // 检测到的具体信号
-  degraded?: boolean;   // 是否降级到本地检测
 }
 
 // API响应类型
@@ -86,7 +75,6 @@ export interface DetectRequest {
   text?: string;
   url?: string;
   token: string;
-  models?: string[];  // 选中的模型ID列表
   enableParagraphDetection?: boolean;  // 是否启用段落级检测
   enableSourceIdentification?: boolean;  // 是否启用来源识别
   enableSuggestions?: boolean;  // 是否生成修改建议
