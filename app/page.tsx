@@ -418,6 +418,14 @@ export default function Home() {
                         <div className="p-2 bg-white bg-opacity-60 rounded text-gray-700">{p.paragraph}</div>
                       </div>
 
+                      {/* 模型评价 */}
+                      {p.reason && (
+                        <div className="mb-3">
+                          <div className="text-xs text-gray-500 mb-1">模型评价：</div>
+                          <div className="p-2 bg-blue-50 bg-opacity-60 rounded text-gray-700 text-sm">{p.reason}</div>
+                        </div>
+                      )}
+
                       {/* 修改建议 */}
                       {p.suggestions && p.suggestions.length > 0 && (
                         <div className="mb-3">

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { detectAIContent } from '@/lib/detect';
 import { fetchArticleFromUrl, isValidUrl } from '@/lib/fetch';
-import { isValidModel } from '@/lib/models';
+import { isValidModel, AVAILABLE_MODELS } from '@/lib/models';
 
 // 公开API - 通过API Key认证
 export async function POST(request: NextRequest) {
@@ -108,6 +108,13 @@ export async function POST(request: NextRequest) {
 
 // API文档
 export async function GET() {
+  // 从环境变量动态获取可用模型列表
+  const models = AVAILABLE_MODELS.map(m => ({
+    id: m.id,
+    name: m.name,
+    is_free: m.isFree
+  }));
+
   return NextResponse.json({
     name: 'NotAI Detection API',
     version: '1.0.0',
@@ -122,7 +129,7 @@ export async function GET() {
         parameters: {
           text: '文本内容（与url二选一）',
           url: '文章链接（与text二选一）',
-          models: '模型ID数组，可选值: deepseek-v4-flash, mimo-v2.5, plan/qwen3-8b',
+          models: `模型ID数组，可选值: ${models.map(m => m.id).join(', ')}`,
           enable_paragraph_detection: '是否启用段落级检测',
           enable_source_identification: '是否启用AI来源识别',
           enable_suggestions: '是否生成修改建议'
@@ -132,8 +139,8 @@ export async function GET() {
           data: {
             ai_probability: 'AI概率 (0-100)',
             perplexity: '困惑度（已弃用，恒为0）',
-        model_score: '模型深度判断评分 (0-100)',
-        local_score: '本地综合评分 (0-100)',
+            model_score: '模型深度判断评分 (0-100)',
+            local_score: '本地综合评分 (0-100)',
             confidence: '置信度 (high/medium/low)',
             confidence_interval: '置信区间 { lower, upper }',
             statistics: '统计特征',
@@ -144,10 +151,6 @@ export async function GET() {
         }
       }
     },
-    models: [
-      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', is_free: false },
-      { id: 'mimo-v2.5', name: 'MiMo V2.5', is_free: false },
-      { id: 'plan/qwen3-8b', name: 'Qwen3-8B', is_free: true }
-    ]
+    models
   });
 }

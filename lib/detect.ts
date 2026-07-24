@@ -185,7 +185,13 @@ ${truncatedText}`;
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content || '';
-    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
+    
+    // 打印完整响应用于调试
+    if (!content) {
+      console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
+    } else {
+      console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
+    }
 
     const parsed = parseModelJson(content);
     if (parsed === null) {
@@ -434,6 +440,12 @@ ${fragments}`;
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content || '';
+    
+    // 打印完整响应用于调试
+    if (!content) {
+      console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
+      return new Map();
+    }
     console.log(`[段落检测] 模型 ${modelId} 返回: ${content.substring(0, 300)}`);
 
     return parseBatchResponse(content);
@@ -443,8 +455,11 @@ ${fragments}`;
   }
 }
 
-// 段落级检测（全文标注，批量调用模型）
-export async function detectParagraphs(text: string, modelId: string = PROMPT_MODEL): Promise<ParagraphResult[]> {
+// 段落级检测（全文标注，支持多模型并行）
+export async function detectParagraphs(text: string, modelIds: string | string[] = PROMPT_MODEL): Promise<ParagraphResult[]> {
+  // 统一处理为模型数组
+  const modelList = Array.isArray(modelIds) ? modelIds : [modelIds];
+  
   // 句子分割 + 位置追踪
   const sentences: SentenceInfo[] = [];
   const re = /[^。！？\n]+[。！？\n]?/g;
@@ -488,18 +503,43 @@ export async function detectParagraphs(text: string, modelId: string = PROMPT_MO
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 批量调用模型
-  let batchResult = new Map<number, { score: number; reason: string }>();
-  try {
-    batchResult = await callBatchParagraphModel(chunks, modelId);
-  } catch (error) {
-    console.error('[段落检测] 批量调用失败，降级到本地:', error);
-  }
+  // 多模型并行调用
+  console.log(`[段落检测] 调用 ${modelList.length} 个模型并行检测...`);
+  const allResults = await Promise.all(
+    modelList.map(modelId => callBatchParagraphModel(chunks, modelId))
+  );
 
-  // 组装结果（缺失片段降级到本地，位置信息保留）
+  // 统计成功的模型数
+  const successCount = allResults.filter(r => r.size > 0).length;
+  console.log(`[段落检测] 成功模型: ${successCount}/${modelList.length}`);
+
+  // 组装结果（多模型取平均，缺失片段降级到本地）
   return chunks.map(ch => {
-    const r = batchResult.get(ch.index);
-    const ai = r ? r.score : detectLocal(ch.text).aiProbability;
+    // 收集所有成功模型的评分和 reason
+    const scores: number[] = [];
+    let firstReason = '';
+    
+    for (const batchResult of allResults) {
+      const r = batchResult.get(ch.index);
+      if (r) {
+        scores.push(r.score);
+        if (!firstReason) firstReason = r.reason; // 取第一个成功模型的 reason
+      }
+    }
+    
+    // 计算平均评分
+    let ai: number;
+    let reason: string;
+    
+    if (scores.length > 0) {
+      ai = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+      reason = firstReason || '多模型平均';
+    } else {
+      // 所有模型都失败，降级到本地
+      ai = detectLocal(ch.text).aiProbability;
+      reason = '本地降级';
+    }
+    
     const { suggestions } = generateParagraphSuggestions(ch.text, ai);
     return {
       paragraph: ch.text,
@@ -507,6 +547,7 @@ export async function detectParagraphs(text: string, modelId: string = PROMPT_MO
       endIndex: ch.end,
       aiProbability: ai,
       isAI: ai > 60,
+      reason,
       suggestions
     };
   });
@@ -668,12 +709,21 @@ export async function detectAIContent(
       };
     });
 
-    // 4. 只对未降级模型取平均作为 promptScore；全部降级则回退本地
+    // 4. 只对未降级模型取平均作为 promptScore
+    // 全部降级时用保守值 50（不确定），而不是 localScore（避免本地评分偏高误判）
     const validResults = promptResults.filter(r => !r.degraded);
+    const allDegraded = validResults.length === 0;
+    
     const promptScore = validResults.length > 0
       ? Math.round(validResults.reduce((s, r) => s + r.aiProbability, 0) / validResults.length)
-      : localScore;
-    const promptReason = validResults[0]?.reason || '本地降级';
+      : 50;  // 全部降级时用保守值
+    
+    const promptReason = validResults[0]?.reason || (allDegraded ? '全部模型降级' : '本地降级');
+    
+    // 如果全部模型降级，降低置信度并打印警告
+    if (allDegraded) {
+      console.warn(`[检测] 警告：全部模型降级，使用保守评分 50，本地评分为 ${localScore}`);
+    }
 
     // 5. 一致性纠偏综合评分
     const aiProbability = reconcileScore(promptScore, localScore, stats);
@@ -696,10 +746,23 @@ export async function detectAIContent(
     const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, promptScore);
 
     // 8. 段落级检测（可选）
+    // 使用所有成功的模型进行段落检测
     let paragraphResults: ParagraphResult[] | undefined;
     if (enableParagraphDetection && text.length > 200) {
       try {
-        paragraphResults = await detectParagraphs(text, models[0] || PROMPT_MODEL);
+        // 收集所有成功模型的 ID
+        const successModelIds: string[] = [];
+        promptResults.forEach((r, i) => {
+          if (!r.degraded) {
+            successModelIds.push(promptModels[i]);
+          }
+        });
+        
+        // 如果没有成功的模型，用第一个模型尝试（可能降级）
+        const modelsToUse = successModelIds.length > 0 ? successModelIds : [models[0] || PROMPT_MODEL];
+        
+        console.log(`[段落检测] 使用 ${successModelIds.length}/${promptModels.length} 个成功模型`);
+        paragraphResults = await detectParagraphs(text, modelsToUse);
       } catch (error) {
         console.error('[检测] 段落级检测失败:', error);
       }
