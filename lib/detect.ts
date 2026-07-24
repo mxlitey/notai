@@ -33,6 +33,7 @@ interface ModelPromptResult {
   aiProbability: number;
   reason: string;
   signals: string[];
+  suggestions: string[];
   degraded: boolean;
 }
 
@@ -41,8 +42,8 @@ function stripCodeFence(s: string): string {
   return s.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 }
 
-// 解析模型返回的 JSON（含 score/reason/signals），三层降级
-function parseModelJson(content: string): { score: number; reason: string; signals: string[] } | null {
+// 解析模型返回的 JSON（含 score/reason/signals/suggestions），三层降级
+function parseModelJson(content: string): { score: number; reason: string; signals: string[]; suggestions: string[] } | null {
   const cleaned = stripCodeFence(content);
 
   // Step 1: 整体 JSON.parse
@@ -52,7 +53,8 @@ function parseModelJson(content: string): { score: number; reason: string; signa
       return {
         score: obj.score,
         reason: String(obj.reason || ''),
-        signals: Array.isArray(obj.signals) ? obj.signals.map(String) : []
+        signals: Array.isArray(obj.signals) ? obj.signals.map(String) : [],
+        suggestions: Array.isArray(obj.suggestions) ? obj.suggestions.map(String) : []
       };
     }
   } catch { /* 继续 */ }
@@ -67,7 +69,8 @@ function parseModelJson(content: string): { score: number; reason: string; signa
         return {
           score: obj.score,
           reason: String(obj.reason || ''),
-          signals: Array.isArray(obj.signals) ? obj.signals.map(String) : []
+          signals: Array.isArray(obj.signals) ? obj.signals.map(String) : [],
+          suggestions: Array.isArray(obj.suggestions) ? obj.suggestions.map(String) : []
         };
       }
     } catch { /* 继续 */ }
@@ -80,14 +83,41 @@ function parseModelJson(content: string): { score: number; reason: string; signa
     return {
       score: parseInt(scoreMatch[1], 10),
       reason: reasonMatch ? reasonMatch[1] : '',
-      signals: []
+      signals: [],
+      suggestions: []
     };
   }
 
-  // Step 4: 兜底——纯数字输出兼容
-  const numMatch = cleaned.match(/\d+/);
-  if (numMatch) {
-    return { score: parseInt(numMatch[0], 10), reason: '纯数字输出', signals: [] };
+  // Step 4: 从推理过程的结尾部分提取评分（处理 DeepSeek 推理模型）
+  // 推理模型通常在最后给出结论，所以检查最后 500 字符
+  const lastPart = cleaned.slice(-500);
+  
+  // 尝试匹配 "答案是X"、"评分为X"、"分数是X"、"最终评分X" 等模式
+  const conclusionPatterns = [
+    /(?:答案|评分|分数|最终评分|结论)[是为：:\s]*(\d{1,3})/i,
+    /(?:score)[：:\s]*(\d{1,3})/i,
+    /(\d{1,3})\s*(?:分|%\s*|左右)/,
+  ];
+  
+  for (const pattern of conclusionPatterns) {
+    const match = lastPart.match(pattern);
+    if (match && parseInt(match[1], 10) >= 0 && parseInt(match[1], 10) <= 100) {
+      console.log(`[Prompt检测] 从推理过程提取评分: ${match[1]}`);
+      return { score: parseInt(match[1], 10), reason: '推理模型输出', signals: [], suggestions: [] };
+    }
+  }
+  
+  // Step 5: 兜底——取最后一个出现的 0-100 范围内的数字
+  const allNumbers = cleaned.match(/\b\d{1,3}\b/g);
+  if (allNumbers) {
+    // 从后往前找，优先找最后出现的 0-100 范围内的数字
+    for (let i = allNumbers.length - 1; i >= 0; i--) {
+      const num = parseInt(allNumbers[i], 10);
+      if (num >= 0 && num <= 100) {
+        console.log(`[Prompt检测] 兜底提取最后一个数字: ${num}`);
+        return { score: num, reason: '推理模型输出（兜底）', signals: [], suggestions: [] };
+      }
+    }
   }
 
   return null;
@@ -98,16 +128,11 @@ async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Pr
   if (!API_KEY) {
     console.warn('[Prompt检测] API_KEY未配置，降级为本地检测');
     const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: 'API未配置', signals: [], degraded: true };
+    return { aiProbability: result.aiProbability, reason: 'API未配置', signals: [], suggestions: [], degraded: true };
   }
 
-  // 文本截断（控制token消耗）
-  const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text;
-  
-  // 打印截断信息
-  if (text.length > 2000) {
-    console.log(`[Prompt检测] 文章长度 ${text.length}，已截断到 2000 字符`);
-  }
+  // 全文输入，不截断
+  console.log(`[Prompt检测] 文章长度 ${text.length} 字符，全文输入`);
 
   // 关键：避免「文笔好/正式文体」被误判为AI的核心信号是AI模板词密度
   const prompt = `你是AI文本检测专家。判断以下中文文章是否由AI生成，输出严格JSON。
@@ -139,18 +164,25 @@ async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Pr
 - 80-100：高AI（大量AI模板词 + 句式极度规整 + 无个人视角 + 信息密度均匀）
 
 【输出格式】严格JSON，不要任何额外文字、不要markdown代码块：
-{"score": 0到100的整数, "reason": "一句话核心依据，指出主要信号", "signals": ["信号1", "信号2"]}
+{"score": 0到100的整数, "reason": "一句话核心依据，指出主要信号", "signals": ["信号1", "信号2"], "suggestions": ["修改建议1", "修改建议2"]}
+
+【修改建议规则】
+- score < 40：建议为空数组，因为文章已足够自然
+- score >= 40：给出2-3条具体、可操作的修改建议，例如：
+  - "把'综上所述'替换为自己的总结表达"
+  - "加入一句个人感受或具体事例"
+  - "用短句打破句式均匀感"
 
 示例：
-{"score": 75, "reason": "高频出现首先/其次/综上所述，无个人视角", "signals": ["AI模板词:首先/其次/综上所述", "句式均匀", "无个人事例"]}
+{"score": 75, "reason": "高频出现首先/其次/综上所述，无个人视角", "signals": ["AI模板词:首先/其次/综上所述", "句式均匀", "无个人事例"], "suggestions": ["减少'首先/其次'等模板词，用自己的语言连接", "加入个人观点或具体事例", "用短句或感叹句打破均匀句式"]}
 
 【待检测文章】
-${truncatedText}`;
+${text}`;
 
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 400,
+    max_tokens: 1500,  // 增加到 1500，给推理模型足够的输出空间
     temperature: 0.1,
     response_format: { type: 'json_object' }
   };
@@ -185,7 +217,7 @@ ${truncatedText}`;
       } catch { /* ignore */ }
       console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: `API请求失败:${response.status}`, signals: [], degraded: true };
+      return { aiProbability: result.aiProbability, reason: `API请求失败:${response.status}`, signals: [], suggestions: [], degraded: true };
     }
 
     const data = await response.json();
@@ -204,7 +236,7 @@ ${truncatedText}`;
       console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
       // 空内容降级到本地
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: '模型返回空内容', signals: [], degraded: true };
+      return { aiProbability: result.aiProbability, reason: '模型返回空内容', signals: [], suggestions: [], degraded: true };
     }
     
     console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
@@ -212,19 +244,20 @@ ${truncatedText}`;
     const parsed = parseModelJson(content);
     if (parsed === null) {
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: '无法解析评分', signals: [], degraded: true };
+      return { aiProbability: result.aiProbability, reason: '无法解析评分', signals: [], suggestions: [], degraded: true };
     }
 
     return {
       aiProbability: clamp(parsed.score, 0, 100),
       reason: parsed.reason || '模型判断',
       signals: parsed.signals,
+      suggestions: parsed.suggestions,
       degraded: false
     };
   } catch (error) {
     console.error('[Prompt检测] 异常:', error);
     const result = detectLocal(text);
-    return { aiProbability: result.aiProbability, reason: '调用异常', signals: [], degraded: true };
+    return { aiProbability: result.aiProbability, reason: '调用异常', signals: [], suggestions: [], degraded: true };
   }
 }
 
@@ -252,70 +285,14 @@ function reconcileScore(
   return clamp(Math.round(promptScore * 0.7 + localScore * 0.3), 0, 100);
 }
 
-// 生成针对片段的修改建议
-function generateParagraphSuggestions(text: string, aiProbability: number): { suggestions: string[]; modifiedText?: string } {
-  const suggestions: string[] = [];
-
-  if (aiProbability < 50) {
-    return { suggestions: ['该片段风格自然，无明显AI特征。'] };
-  }
-
-  // 检测句式问题
-  const sentences = text.split(/[。！？.!?]/).filter(s => s.trim());
-  const sentenceLengths = sentences.map(s => s.length);
-  const avgLength = sentenceLengths.reduce((a, b) => a + b, 0) / (sentenceLengths.length || 1);
-  const varLen = sentenceLengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / (sentenceLengths.length || 1);
-
-  // 检测AI常用词（使用共享清单）
-  const foundAiWords = AI_TEMPLATE_WORDS.filter(word => text.includes(word));
-
-  // 检测重复词汇
-  const words = text.match(/[\u4e00-\u9fa5]+/g) || [];
-  const wordCount: Record<string, number> = {};
-  words.forEach(w => {
-    if (w.length > 1) {
-      wordCount[w] = (wordCount[w] || 0) + 1;
-    }
-  });
-  const repeatedWords = Object.entries(wordCount).filter(([_, count]) => count > 2).map(([word]) => word);
-
-  // 生成针对性建议
-  if (aiProbability > 70) {
-    suggestions.push('该片段有较明显的AI特征，建议重写。');
-  } else {
-    suggestions.push('该片段有一些AI特征，建议优化。');
-  }
-  suggestions.push('');
-
-  if (varLen < avgLength * 0.1 && avgLength > 20) {
-    suggestions.push('【句式】句子长度过于均匀');
-    suggestions.push('  - 穿插短句，如"真的。""确实如此。"');
-  }
-
-  if (foundAiWords.length > 0) {
-    suggestions.push(`【用词】检测到AI常用词：${foundAiWords.slice(0, 6).join('、')}`);
-    suggestions.push('  - 用自己的话重新表达这些连接关系');
-  }
-
-  if (repeatedWords.length > 0) {
-    suggestions.push(`【词汇】重复用词：${repeatedWords.slice(0, 3).join('、')}`);
-    suggestions.push('  - 尝试同义词替换或省略');
-  }
-
-  suggestions.push('【内容】加入个人观点或具体例子');
-
-  // 不再生成机械的修改示例
-  return { suggestions };
-}
-
 // ----- 段落级批量检测 -----
 
 interface SentenceInfo { text: string; start: number; end: number; }
 interface ChunkInfo { index: number; text: string; start: number; end: number; }
 
 // 解析批量段落返回的 JSON 数组，多层降级
-function parseBatchResponse(content: string): Map<number, { score: number; reason: string }> {
-  const result = new Map<number, { score: number; reason: string }>();
+function parseBatchResponse(content: string): Map<number, { score: number; reason: string; suggestions: string[] }> {
+  const result = new Map<number, { score: number; reason: string; suggestions: string[] }>();
   let cleaned = stripCodeFence(content);
 
   // Step 1: 整体 JSON.parse
@@ -326,7 +303,8 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
         if (item && typeof item.index === 'number' && typeof item.score === 'number') {
           result.set(item.index, {
             score: clamp(item.score, 0, 100),
-            reason: String(item.reason || '').substring(0, 200)
+            reason: String(item.reason || '').substring(0, 200),
+            suggestions: Array.isArray(item.suggestions) ? item.suggestions.map(String) : []
           });
         }
       }
@@ -345,7 +323,8 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
           if (item && typeof item.index === 'number' && typeof item.score === 'number') {
             result.set(item.index, {
               score: clamp(item.score, 0, 100),
-              reason: String(item.reason || '').substring(0, 200)
+              reason: String(item.reason || '').substring(0, 200),
+              suggestions: Array.isArray(item.suggestions) ? item.suggestions.map(String) : []
             });
           }
         }
@@ -365,7 +344,8 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
           if (item && typeof item.index === 'number' && typeof item.score === 'number') {
             result.set(item.index, {
               score: clamp(item.score, 0, 100),
-              reason: String(item.reason || '').substring(0, 200)
+              reason: String(item.reason || '').substring(0, 200),
+              suggestions: Array.isArray(item.suggestions) ? item.suggestions.map(String) : []
             });
           }
         }
@@ -384,7 +364,15 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
     // 提取 reason（可能跨行，用非贪婪匹配）
     const reasonMatch = m[0].match(/"reason"\s*:\s*"([\s\S]*?)"/);
     const reason = reasonMatch ? reasonMatch[1].replace(/\\n/g, ' ').substring(0, 200) : '';
-    result.set(idx, { score, reason });
+    // 提取 suggestions（数组格式）
+    const suggestionsMatch = m[0].match(/"suggestions"\s*:\s*\[([\s\S]*?)\]/);
+    let suggestions: string[] = [];
+    if (suggestionsMatch) {
+      try {
+        suggestions = JSON.parse('[' + suggestionsMatch[1] + ']');
+      } catch { /* 忽略解析错误 */ }
+    }
+    result.set(idx, { score, reason, suggestions });
   }
 
   return result;
@@ -394,7 +382,7 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
 async function callBatchParagraphModel(
   chunks: ChunkInfo[],
   modelId: string
-): Promise<Map<number, { score: number; reason: string }>> {
+): Promise<Map<number, { score: number; reason: string; suggestions: string[] }>> {
   if (!API_KEY || chunks.length === 0) return new Map();
 
   const fragments = chunks.map(ch => `【片段${ch.index}】\n${ch.text}`).join('\n\n');
@@ -426,9 +414,13 @@ async function callBatchParagraphModel(
 
 【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致。不要输出任何其他文字、不要markdown代码块：
 [
-  {"index": 1, "score": 0到100整数, "reason": "一句话依据"},
-  {"index": 2, "score": ..., "reason": ...}
+  {"index": 1, "score": 0到100整数, "reason": "一句话依据", "suggestions": ["修改建议1", "修改建议2"]},
+  {"index": 2, "score": ..., "reason": ..., "suggestions": ...}
 ]
+
+【修改建议规则】
+- score < 40：suggestions 为空数组，因为片段已足够自然
+- score >= 40：给出1-2条具体、可操作的修改建议
 
 ${fragments}`;
 
@@ -515,14 +507,13 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
   if (sentences.length === 0) {
     // 无法分割，直接返回整体
     const { aiProbability } = detectLocal(text);
-    const { suggestions } = generateParagraphSuggestions(text, aiProbability);
     return [{
       paragraph: text,
       startIndex: 0,
       endIndex: text.length,
       aiProbability,
       isAI: aiProbability > 60,
-      suggestions
+      suggestions: []
     }];
   }
 
@@ -556,32 +547,52 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
 
   // 组装结果（多模型取平均，缺失片段降级到本地）
   return chunks.map(ch => {
-    // 收集所有成功模型的评分和 reason
+    // 收集所有成功模型的评分、reason、suggestions
     const scores: number[] = [];
     let firstReason = '';
+    let firstSuggestions: string[] = [];
     
-    for (const batchResult of allResults) {
+    // 收集各模型的独立结果
+    const modelResults: { modelId: string; modelName: string; score: number; reason: string; suggestions: string[] }[] = [];
+    
+    for (let i = 0; i < allResults.length; i++) {
+      const batchResult = allResults[i];
+      const modelId = modelList[i];
+      const modelConfig = getModelConfig(modelId);
       const r = batchResult.get(ch.index);
+      
       if (r) {
         scores.push(r.score);
-        if (!firstReason) firstReason = r.reason; // 取第一个成功模型的 reason
+        if (!firstReason) firstReason = r.reason;
+        if (firstSuggestions.length === 0) firstSuggestions = r.suggestions;
+        
+        // 添加到 modelResults
+        modelResults.push({
+          modelId,
+          modelName: modelConfig?.name || modelId,
+          score: r.score,
+          reason: r.reason,
+          suggestions: r.suggestions
+        });
       }
     }
     
     // 计算平均评分
     let ai: number;
     let reason: string;
+    let suggestions: string[];
     
     if (scores.length > 0) {
       ai = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
       reason = firstReason || '多模型平均';
+      suggestions = firstSuggestions;
     } else {
       // 所有模型都失败，降级到本地
       ai = detectLocal(ch.text).aiProbability;
       reason = '本地降级';
+      suggestions = [];
     }
     
-    const { suggestions } = generateParagraphSuggestions(ch.text, ai);
     return {
       paragraph: ch.text,
       startIndex: ch.start,
@@ -589,7 +600,8 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
       aiProbability: ai,
       isAI: ai > 60,
       reason,
-      suggestions
+      suggestions,
+      modelResults
     };
   });
 }
@@ -648,59 +660,6 @@ export function calculateConfidenceInterval(aiProbability: number, samples: numb
     lower: Math.max(0, Math.round(aiProbability - margin)),
     upper: Math.min(100, Math.round(aiProbability + margin))
   };
-}
-
-// 生成修改建议
-export function generateSuggestions(statistics: { sentenceLengthVariance: number; lexicalDiversity: number; punctuationScore: number }, aiProbability: number): string[] {
-  const suggestions: string[] = [];
-
-  if (aiProbability < 50) {
-    suggestions.push('文章整体风格自然，未检测到明显的AI生成特征。');
-    suggestions.push('继续保持个人写作风格，文章质量良好。');
-    return suggestions;
-  }
-
-  if (aiProbability > 80) {
-    suggestions.push('文章有多项AI写作特征，建议大幅重写。');
-  } else if (aiProbability > 60) {
-    suggestions.push('文章存在一些AI写作特征，建议重点修改以下方面：');
-  } else {
-    suggestions.push('文章存在少量AI写作特征，可参考以下建议优化：');
-  }
-
-  suggestions.push('');
-
-  // 句式建议
-  if (statistics.sentenceLengthVariance > 55) {
-    suggestions.push('【句式】句子长度过于规整，建议：');
-    suggestions.push('  - 穿插一些短句（5-10字），打破均匀节奏');
-    suggestions.push('  - 尝试倒装、反问等句式变化');
-    suggestions.push('  - 可以用"对。""嗯。""真的。"这类极短句');
-  }
-
-  // 词汇建议
-  if (statistics.lexicalDiversity < 45) {
-    suggestions.push('【词汇】词汇重复较多，建议：');
-    suggestions.push('  - 用具体的描述替代抽象的表达（如"好"→"让人眼前一亮"）');
-    suggestions.push('  - 加入一些口语词，如"反正""倒是""怎么说呢"');
-    suggestions.push('  - 适当使用比喻、拟人等修辞手法');
-  }
-
-  // 标点建议
-  if (statistics.punctuationScore > 55) {
-    suggestions.push('【标点】标点使用过于规范，建议：');
-    suggestions.push('  - 可以用省略号（...）表示停顿或留白');
-    suggestions.push('  - 用破折号（——）做补充说明，更口语化');
-    suggestions.push('  - 不必每句都用句号，可以用逗号连接短句');
-  }
-
-  // 通用建议
-  suggestions.push('【内容】增加个人痕迹：');
-  suggestions.push('  - 加入自己的经历、感受或观点');
-  suggestions.push('  - 用"我觉得""说实话""讲真"等主观表达');
-  suggestions.push('  - 可以适当跑题、插入个人联想');
-
-  return suggestions;
 }
 
 // 主检测函数
@@ -815,10 +774,11 @@ export async function detectAIContent(
       sourceIdentification = identifyAISource(text);
     }
 
-    // 10. 修改建议（可选）
+    // 10. 修改建议（可选，从模型返回中获取）
     let suggestions: string[] | undefined;
     if (enableSuggestions) {
-      suggestions = generateSuggestions(stats, aiProbability);
+      // 取第一个成功模型的 suggestions
+      suggestions = validResults[0]?.suggestions;
     }
 
     console.log(`[检测] 完成, AI概率: ${aiProbability}%`);

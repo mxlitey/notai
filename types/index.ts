@@ -35,11 +35,21 @@ export interface ParagraphResult {
   paragraph: string;      // 段落内容
   startIndex: number;     // 起始位置
   endIndex: number;       // 结束位置
-  aiProbability: number;  // AI概率
+  aiProbability: number;  // AI概率（多模型平均）
   isAI: boolean;          // 是否为AI生成
-  reason?: string;        // 模型给出的评价
-  suggestions?: string[]; // 针对该段的修改建议
+  reason?: string;        // 模型给出的评价（第一个成功模型的）
+  suggestions?: string[]; // 针对该段的修改建议（第一个成功模型的）
   modifiedText?: string;  // 修改后的文本示例
+  modelResults?: ParagraphModelResult[];  // 各模型的独立结果
+}
+
+// 段落级多模型检测结果
+export interface ParagraphModelResult {
+  modelId: string;
+  modelName: string;
+  score: number;
+  reason: string;
+  suggestions: string[];
 }
 
 // 多模型检测结果

@@ -418,24 +418,57 @@ export default function Home() {
                         <div className="p-2 bg-white bg-opacity-60 rounded text-gray-700">{p.paragraph}</div>
                       </div>
 
-                      {/* 模型评价 */}
-                      {p.reason && (
+                      {/* 多模型结果 */}
+                      {p.modelResults && p.modelResults.length > 1 ? (
                         <div className="mb-3">
-                          <div className="text-xs text-gray-500 mb-1">模型评价：</div>
-                          <div className="p-2 bg-blue-50 bg-opacity-60 rounded text-gray-700 text-sm">{p.reason}</div>
-                        </div>
-                      )}
-
-                      {/* 修改建议 */}
-                      {p.suggestions && p.suggestions.length > 0 && (
-                        <div className="mb-3">
-                          <div className="text-xs text-gray-500 mb-1">修改建议：</div>
-                          <ul className="text-sm text-gray-600 space-y-1">
-                            {p.suggestions.map((s: string, j: number) => (
-                              <li key={j}>{s}</li>
+                          <div className="text-xs text-gray-500 mb-2">各模型检测结果：</div>
+                          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(p.modelResults.length, 2)}, 1fr)` }}>
+                            {p.modelResults.map((mr: { modelId: string; modelName: string; score: number; reason: string; suggestions: string[] }, idx: number) => (
+                              <div key={idx} className="p-3 bg-white bg-opacity-80 rounded-lg border">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-sm font-medium">{mr.modelName}</span>
+                                  <span className={`text-lg font-bold ${
+                                    mr.score >= 70 ? 'text-red-600' :
+                                    mr.score >= 50 ? 'text-yellow-600' :
+                                    'text-green-600'
+                                  }`}>
+                                    {mr.score}%
+                                  </span>
+                                </div>
+                                {mr.reason && (
+                                  <div className="text-xs text-gray-600 mb-2">{mr.reason}</div>
+                                )}
+                                {mr.suggestions && mr.suggestions.length > 0 && (
+                                  <div className="text-xs text-gray-500">
+                                    建议：{mr.suggestions.join('；')}
+                                  </div>
+                                )}
+                              </div>
                             ))}
-                          </ul>
+                          </div>
                         </div>
+                      ) : (
+                        <>
+                          {/* 单模型评价 */}
+                          {p.reason && (
+                            <div className="mb-3">
+                              <div className="text-xs text-gray-500 mb-1">模型评价：</div>
+                              <div className="p-2 bg-blue-50 bg-opacity-60 rounded text-gray-700 text-sm">{p.reason}</div>
+                            </div>
+                          )}
+
+                          {/* 单模型修改建议 */}
+                          {p.suggestions && p.suggestions.length > 0 && (
+                            <div className="mb-3">
+                              <div className="text-xs text-gray-500 mb-1">修改建议：</div>
+                              <ul className="text-sm text-gray-600 space-y-1">
+                                {p.suggestions.map((s: string, j: number) => (
+                                  <li key={j}>{s}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </>
                       )}
 
                       
@@ -456,12 +489,6 @@ export default function Home() {
                 </ul>
               </div>
             )}
-
-            {/* 详细分析 */}
-            <div>
-              <h3 className="font-semibold mb-3">详细分析</h3>
-              <div className="bg-gray-50 p-4 rounded-lg whitespace-pre-wrap text-gray-700">{result.analysis}</div>
-            </div>
           </div>
         )}
       </div>
