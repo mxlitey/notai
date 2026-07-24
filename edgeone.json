@@ -3,7 +3,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": ".next",
   "framework": "nextjs",
-  "maxDuration": 120,
+  "maxDuration": 180,
   "env": {
     "API_BASE_URL": "@api_base_url",
     "API_KEY": "@api_key",

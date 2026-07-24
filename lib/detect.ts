@@ -157,24 +157,30 @@ ${truncatedText}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(60000)  // 60秒超时
+    signal: AbortSignal.timeout(150000)  // 150秒超时
   });
 
   try {
     let response = await doFetch(body);
 
-    // 若 response_format 不被支持（通常返回400），移除该字段重试一次
-    if (response.status === 400) {
-      console.warn(`[Prompt检测] 模型 ${modelId} 可能不支持 response_format，移除后重试`);
+    // 若 response_format 不被支持（可能返回400/503），移除该字段重试一次
+    if (response.status === 400 || response.status === 503) {
+      console.warn(`[Prompt检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
       const bodyNoFmt = { ...body };
       delete bodyNoFmt.response_format;
       response = await doFetch(bodyNoFmt);
     }
 
     if (!response.ok) {
-      console.error(`[Prompt检测] API请求失败: ${response.status}`);
+      // 尝试读取错误详情
+      let errorDetail = '';
+      try {
+        const errData = await response.json();
+        errorDetail = errData.error?.message || JSON.stringify(errData);
+      } catch { /* ignore */ }
+      console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
       const result = detectLocal(text);
-      return { aiProbability: result.aiProbability, reason: 'API请求失败', signals: [], degraded: true };
+      return { aiProbability: result.aiProbability, reason: `API请求失败:${response.status}`, signals: [], degraded: true };
     }
 
     const data = await response.json();
@@ -285,10 +291,10 @@ function generateParagraphSuggestions(text: string, aiProbability: number): { su
 interface SentenceInfo { text: string; start: number; end: number; }
 interface ChunkInfo { index: number; text: string; start: number; end: number; }
 
-// 解析批量段落返回的 JSON 数组，三层降级
+// 解析批量段落返回的 JSON 数组，多层降级
 function parseBatchResponse(content: string): Map<number, { score: number; reason: string }> {
   const result = new Map<number, { score: number; reason: string }>();
-  const cleaned = stripCodeFence(content);
+  let cleaned = stripCodeFence(content);
 
   // Step 1: 整体 JSON.parse
   try {
@@ -326,14 +332,37 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
     } catch { /* 继续 */ }
   }
 
-  // Step 3: 逐对象正则提取
-  const objRegex = /\{[^{}]*"index"\s*:\s*(\d+)[^{}]*"score"\s*:\s*(\d+)[^{}]*\}/g;
+  // Step 3: 尝试包装成数组（处理 "{...}, {...}, {...}" 格式）
+  // 移除首尾逗号，加上方括号
+  const trimmed = cleaned.trim().replace(/^,+\s*/, '').replace(/,+\s*$/, '');
+  if (trimmed.startsWith('{')) {
+    try {
+      const arr = JSON.parse('[' + trimmed + ']');
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item && typeof item.index === 'number' && typeof item.score === 'number') {
+            result.set(item.index, {
+              score: clamp(item.score, 0, 100),
+              reason: String(item.reason || '').substring(0, 200)
+            });
+          }
+        }
+        if (result.size > 0) return result;
+      }
+    } catch { /* 继续 */ }
+  }
+
+  // Step 4: 逐对象正则提取（处理多行 JSON 对象）
+  // 匹配 { ... "index": N ... "score": M ... } 格式，支持多行
+  const objRegex = /\{[\s\S]*?"index"\s*:\s*(\d+)[\s\S]*?"score"\s*:\s*(\d+)[\s\S]*?\}/g;
   let m: RegExpExecArray | null;
   while ((m = objRegex.exec(cleaned)) !== null) {
     const idx = parseInt(m[1], 10);
     const score = clamp(parseInt(m[2], 10), 0, 100);
-    const reasonMatch = m[0].match(/"reason"\s*:\s*"([^"]*)"/);
-    result.set(idx, { score, reason: reasonMatch ? reasonMatch[1] : '' });
+    // 提取 reason（可能跨行，用非贪婪匹配）
+    const reasonMatch = m[0].match(/"reason"\s*:\s*"([\s\S]*?)"/);
+    const reason = reasonMatch ? reasonMatch[1].replace(/\\n/g, ' ').substring(0, 200) : '';
+    result.set(idx, { score, reason });
   }
 
   return result;
@@ -379,22 +408,27 @@ ${fragments}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(60000)
+    signal: AbortSignal.timeout(150000)  // 150秒超时
   });
 
   try {
     let response = await doFetch(body);
 
-    // response_format 不支持则移除重试
-    if (response.status === 400) {
-      console.warn(`[段落检测] 模型 ${modelId} 可能不支持 response_format，移除后重试`);
+    // response_format 不支持则移除重试（400/503）
+    if (response.status === 400 || response.status === 503) {
+      console.warn(`[段落检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
       const bodyNoFmt = { ...body };
       delete bodyNoFmt.response_format;
       response = await doFetch(bodyNoFmt);
     }
 
     if (!response.ok) {
-      console.error(`[段落检测] API请求失败: ${response.status}`);
+      let errorDetail = '';
+      try {
+        const errData = await response.json();
+        errorDetail = errData.error?.message || JSON.stringify(errData);
+      } catch { /* ignore */ }
+      console.error(`[段落检测] API请求失败: ${response.status} ${errorDetail}`);
       return new Map();
     }
 

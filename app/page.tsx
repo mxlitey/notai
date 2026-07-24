@@ -308,10 +308,10 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 多模型结果 */}
-            {result.modelResults && result.modelResults.length > 1 && (
+            {/* 模型检测结果 */}
+            {result.modelResults && result.modelResults.length > 0 && (
               <div className="mb-6">
-                <h3 className="font-semibold mb-3">多模型检测结果</h3>
+                <h3 className="font-semibold mb-3">{result.modelResults.length > 1 ? '多模型检测结果' : '模型检测结果'}</h3>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {result.modelResults.map((mr: any) => (
                     <div key={mr.modelId} className="flex justify-between items-center p-3 bg-gray-50 rounded">
