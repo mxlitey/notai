@@ -293,8 +293,8 @@ export default function Home() {
                 </div>
               </div>
               <div className="bg-gray-50 p-4 rounded-lg text-center">
-                <div className="text-sm text-gray-500 mb-1">困惑度</div>
-                <div className="text-4xl font-bold text-gray-700">{result.perplexity}</div>
+                <div className="text-sm text-gray-500 mb-1">模型评分</div>
+                <div className="text-4xl font-bold text-gray-700">{result.modelScore ?? '—'}%</div>
               </div>
               <div className="bg-gray-50 p-4 rounded-lg text-center">
                 <div className="text-sm text-gray-500 mb-1">置信度</div>
@@ -317,7 +317,7 @@ export default function Home() {
                     <div key={mr.modelId} className="flex justify-between items-center p-3 bg-gray-50 rounded">
                       <div>
                         <div className="font-medium">{mr.modelName}</div>
-                        <div className="text-xs text-gray-500">困惑度: {mr.perplexity}</div>
+                        <div className="text-xs text-gray-500">本地特征评分</div>
                       </div>
                       <div className={`text-lg font-bold ${mr.aiProbability > 70 ? 'text-red-600' : mr.aiProbability > 50 ? 'text-orange-500' : 'text-green-600'}`}>
                         {mr.aiProbability}%

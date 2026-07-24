@@ -395,37 +395,28 @@ export async function detectAIContent(
     const localScore = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
     const initialScore = Math.max(10, Math.min(90, localScore));
 
-    // 4. 边界case触发Prompt模型判断
-    // 只有评分在 40-70% 之间的不确定区才调用API
-    let aiProbability = initialScore;
-    let promptScore: number | undefined;
-    let promptReason: string | undefined;
+    // 4. 必须调用Prompt模型判断
+    console.log('[检测] 调用模型深度判断...');
+    const promptModel = models[0] || PROMPT_MODEL;
+    const promptResult = await callModelPrompt(text, promptModel);
+    const promptScore = promptResult.aiProbability;
+    const promptReason = promptResult.reason;
+
+    // 综合评分：本地 60% + 模型 40%
+    const aiProbability = Math.max(0, Math.min(100, Math.round(localScore * 0.6 + promptScore * 0.4)));
+
+    // 置信度判断
     let confidence: 'high' | 'medium' | 'low';
-
-    if (initialScore >= 40 && initialScore <= 70) {
-      // 不确定区，调用Prompt模型判断
-      console.log('[检测] 进入边界区，调用模型深度判断...');
-      const promptModel = models[0] || PROMPT_MODEL;
-      const promptResult = await callModelPrompt(text, promptModel);
-      promptScore = promptResult.aiProbability;
-      promptReason = promptResult.reason;
-
-      // 综合评分：本地 60% + 模型 40%
-      aiProbability = Math.round(localScore * 0.6 + promptScore * 0.4);
+    if (aiProbability > 80 || aiProbability < 20) {
+      confidence = 'high';
+    } else if (aiProbability > 60 || aiProbability < 40) {
       confidence = 'medium';
-      console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${promptScore} = 综合评分 ${aiProbability}% (${promptReason})`);
     } else {
-      // 确定区，直接使用本地评分
-      aiProbability = initialScore;
-
-      if (aiProbability > 80 || aiProbability < 20) {
-        confidence = 'high';
-      } else if (aiProbability > 60 || aiProbability < 40) {
-        confidence = 'medium';
-      } else {
-        confidence = 'low';
-      }
+      confidence = 'low';
     }
+    console.log(`[检测] 本地评分 ${localScore} + 模型评分 ${promptScore} = 综合评分 ${aiProbability}% (${promptReason})`);
+    void initialScore;
+    void promptReason;
 
     // 5. 置信区间
     const confidenceInterval = calculateConfidenceInterval(aiProbability, validModels);
@@ -460,6 +451,8 @@ export async function detectAIContent(
     return {
       aiProbability,
       perplexity: Math.round(perplexity * 100) / 100,
+      modelScore: promptScore,
+      localScore,
       confidence,
       confidenceInterval,
       statistics: {

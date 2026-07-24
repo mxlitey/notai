@@ -85,6 +85,8 @@ export async function POST(request: NextRequest) {
       data: {
         ai_probability: result.aiProbability,
         perplexity: result.perplexity,
+        model_score: result.modelScore,
+        local_score: result.localScore,
         confidence: result.confidence,
         confidence_interval: result.confidenceInterval,
         statistics: result.statistics,
@@ -129,7 +131,9 @@ export async function GET() {
           success: '是否成功',
           data: {
             ai_probability: 'AI概率 (0-100)',
-            perplexity: '困惑度',
+            perplexity: '困惑度（已弃用，恒为0）',
+        model_score: '模型深度判断评分 (0-100)',
+        local_score: '本地综合评分 (0-100)',
             confidence: '置信度 (high/medium/low)',
             confidence_interval: '置信区间 { lower, upper }',
             statistics: '统计特征',

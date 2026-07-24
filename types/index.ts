@@ -1,7 +1,9 @@
 // 检测结果类型
 export interface DetectionResult {
   aiProbability: number;        // AI概率 (0-100)
-  perplexity: number;           // 困惑度
+  perplexity: number;           // 困惑度（已弃用，保留兼容）
+  modelScore?: number;          // 模型深度判断评分 (0-100)
+  localScore?: number;          // 本地综合评分 (0-100)
   confidence: 'high' | 'medium' | 'low';  // 置信度
   confidenceInterval: {
     lower: number;  // 置信区间下限

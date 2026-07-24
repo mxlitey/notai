@@ -8,7 +8,7 @@ export interface ModelConfig {
 
 // 从环境变量解析模型列表
 function parseModelsFromEnv(): ModelConfig[] {
-  const modelStr = process.env.DETECT_MODEL || 'deepseek-v4-flash';
+  const modelStr = process.env.PROMPT_MODEL || 'deepseek-v4-flash';
   const models = modelStr.split(';').map(m => m.trim()).filter(Boolean);
 
   return models.map(modelId => {
