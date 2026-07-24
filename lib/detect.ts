@@ -25,7 +25,7 @@ function detectLocal(text: string): { perplexity: number; aiProbability: number 
   const score = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
   return {
     perplexity: 0,
-    aiProbability: Math.max(10, Math.min(90, score))
+    aiProbability: Math.max(0, Math.min(100, score))
   };
 }
 
@@ -40,16 +40,25 @@ async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Pr
   // 文本截断（控制token消耗）
   const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text;
 
-  const prompt = `你是AI检测专家。请分析以下中文文本是否由AI生成，只给出一个0到100的整数分数，分数越高越可能是AI生成。请严格基于以下特征判断：
-1. 是否过度使用"首先、其次、此外、综上所述"等AI常用词
-2. 句式是否过于规整、逻辑是否过于线性
-3. 是否缺少个人视角、主观表达和口语化表达
-4. 是否缺少情感波动、具体案例和个人经历
-5. 内容是否过于"正确"、缺乏跳跃性思维
+  const prompt = `你是专业的AI文本检测专家，参考朱雀AI检测助手的判定标准。
+分析以下中文文章是否由AI生成，给出严格的评分。
 
-请只输出一个0到100的整数，不要输出其他任何内容。
+评分基准（必须严格遵守）：
+- 纯人类原创：0-20分（特征：自然口语化、个人视角、情感波动、句式跳跃、有错别字或口语词）
+- 人类加工的AI文本：50-75分（特征：底层AI痕迹、逻辑较为线性、部分个人修改痕迹）
+- 纯AI生成：75-100分（特征："首先/其次/此外/综上所述"高频、句式均匀、缺乏个人情感、内容过于"正确"）
 
-文本内容：
+关键判断特征：
+1. AI常用词密度（首先/其次/此外/总之/综上/由此可见）- 高分项
+2. 句长均匀度（方差小=AI）
+3. 逻辑线性程度（线性推进=AI）
+4. 个人痕迹密度（缺个人经历/口语化/主观表达=AI）
+5. 情感波动（缺乏情感起伏=AI）
+6. 内容完美度（完全正确无瑕疵=AI）
+
+请只输出一个0到100的整数，不要任何其他内容。
+
+文章内容：
 ${truncatedText}`;
 
   try {
@@ -395,15 +404,20 @@ export async function detectAIContent(
     const localScore = Math.round(stats.overallScore * 0.4 + topo.overallScore * 0.6);
     const initialScore = Math.max(10, Math.min(90, localScore));
 
-    // 4. 必须调用Prompt模型判断
+    // 4. 必须调用Prompt模型判断（多模型并行，取平均）
     console.log('[检测] 调用模型深度判断...');
-    const promptModel = models[0] || PROMPT_MODEL;
-    const promptResult = await callModelPrompt(text, promptModel);
-    const promptScore = promptResult.aiProbability;
-    const promptReason = promptResult.reason;
+    const promptModels = models.length > 0 ? models : [PROMPT_MODEL];
+    const promptResults = await Promise.all(
+      promptModels.map(m => callModelPrompt(text, m))
+    );
+    // 多模型平均评分
+    const promptScore = Math.round(
+      promptResults.reduce((sum, r) => sum + r.aiProbability, 0) / promptResults.length
+    );
+    const promptReason = promptResults[0]?.reason || '模型判断';
 
-    // 综合评分：本地 60% + 模型 40%
-    const aiProbability = Math.max(0, Math.min(100, Math.round(localScore * 0.6 + promptScore * 0.4)));
+    // 综合评分：模型 70% + 本地 30%（以模型为准）
+    const aiProbability = Math.max(0, Math.min(100, Math.round(promptScore * 0.7 + localScore * 0.3)));
 
     // 置信度判断
     let confidence: 'high' | 'medium' | 'low';
@@ -503,9 +517,18 @@ function generateAnalysis(
     });
   }
 
-  // Prompt模型判断结果（如有）
+  // 模型深度分析
   if (promptScore !== undefined) {
-    lines.push(`\n**模型深度分析**：${promptScore}/100 AI概率（边界case触发模型判断）`);
+    lines.push(`\n**模型深度分析**：${promptScore}/100 AI概率`);
+    if (promptScore < 20) {
+      lines.push('- 模型判定为纯人类原创');
+    } else if (promptScore < 40) {
+      lines.push('- 模型判定为可能人类写作');
+    } else if (promptScore < 70) {
+      lines.push('- 模型判定为人类加工过的AI文本');
+    } else {
+      lines.push('- 模型判定为AI生成');
+    }
   }
 
   lines.push(`\n**统计特征分析**：`);
