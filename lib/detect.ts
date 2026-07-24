@@ -386,7 +386,9 @@ async function callBatchParagraphModel(
   if (!API_KEY || chunks.length === 0) return new Map();
 
   const fragments = chunks.map(ch => `【片段${ch.index}】\n${ch.text}`).join('\n\n');
-  const prompt = `你是AI文本检测专家。下面有 ${chunks.length} 个文本片段，逐个判断是否AI生成。输出严格JSON数组。
+  const prompt = `你是AI文本检测专家。下面有 ${chunks.length} 个文本片段，逐个判断是否AI生成。
+
+【重要】直接输出JSON数组，不要输出任何推理过程或分析。
 
 【核心原则】
 1. 文笔好≠AI生成。人类优秀文章也可能结构严谨、用词规范。不要因为这些就判高分。
@@ -412,7 +414,7 @@ async function callBatchParagraphModel(
 - 60-80：偏AI（出现AI模板词但混入部分人类风格）
 - 80-100：高AI（大量AI模板词 + 句式极度规整）
 
-【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致。不要输出任何其他文字、不要markdown代码块：
+【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致：
 [
   {"index": 1, "score": 0到100整数, "reason": "一句话依据", "suggestions": ["修改建议1", "修改建议2"]},
   {"index": 2, "score": ..., "reason": ..., "suggestions": ...}
@@ -427,7 +429,8 @@ ${fragments}`;
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: Math.min(2000, 100 * chunks.length + 200),
+    // 推理模型需要更多 tokens：每个片段约 200 tokens + 推理空间 1500 tokens
+    max_tokens: Math.min(4000, 200 * chunks.length + 1500),
     temperature: 0.1,
     response_format: { type: 'json_object' }
   };
