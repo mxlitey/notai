@@ -179,23 +179,55 @@ export default function Home() {
 
           {inputMode === 'text' ? (
             <>
-              <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                className="w-full h-48 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none"
-                placeholder="请粘贴要检测的文章内容..."
-              />
+              <div className="relative">
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  className="w-full h-48 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none pr-20"
+                  placeholder="请粘贴要检测的文章内容..."
+                />
+                <button
+                  onClick={async () => {
+                    try {
+                      const clipText = await navigator.clipboard.readText();
+                      setText(clipText);
+                    } catch (err) {
+                      console.error('粘贴失败:', err);
+                    }
+                  }}
+                  className="absolute top-2 right-2 px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
+                  title="从剪贴板粘贴"
+                >
+                  粘贴
+                </button>
+              </div>
               <div className="mt-2 text-right text-sm text-gray-500">{text.length} 字符</div>
             </>
           ) : (
             <>
-              <input
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                placeholder="https://example.com/article"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="https://example.com/article"
+                />
+                <button
+                  onClick={async () => {
+                    try {
+                      const clipText = await navigator.clipboard.readText();
+                      setUrl(clipText);
+                    } catch (err) {
+                      console.error('粘贴失败:', err);
+                    }
+                  }}
+                  className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors whitespace-nowrap"
+                  title="从剪贴板粘贴"
+                >
+                  粘贴
+                </button>
+              </div>
               <div className="mt-2 text-sm text-gray-500">支持微信公众号、知乎、博客等文章链接</div>
             </>
           )}
@@ -247,14 +279,26 @@ export default function Home() {
               <div className="mb-6">
                 <h3 className="font-semibold mb-3">模型检测结果</h3>
                 {result.modelResults.map((mr: any) => (
-                  <div key={mr.modelId} className="p-4 bg-gray-50 rounded-lg">
+                  <div key={mr.modelId} className="p-4 bg-gray-50 rounded-lg mb-3">
                     <div className="flex justify-between items-center mb-2">
                       <span className="font-medium">{mr.modelName}</span>
                       <span className={`text-2xl font-bold ${mr.aiProbability > 70 ? 'text-red-600' : mr.aiProbability > 50 ? 'text-orange-500' : 'text-green-600'}`}>
                         {mr.aiProbability}%
                       </span>
                     </div>
-                    {mr.reason && <div className="text-sm text-gray-600 break-all">{mr.reason}</div>}
+                    {mr.reason && <div className="text-sm text-gray-600 mb-2">{mr.reason}</div>}
+                    {mr.signals && mr.signals.length > 0 && (
+                      <div className="mt-2">
+                        <div className="text-xs text-gray-500 mb-1">检测信号：</div>
+                        <div className="flex flex-wrap gap-2">
+                          {mr.signals.map((signal: string, idx: number) => (
+                            <span key={idx} className="inline-block px-2 py-1 text-xs bg-white border border-gray-200 rounded text-gray-700">
+                              {signal}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -312,9 +356,13 @@ export default function Home() {
                     <span className="inline-block w-4 h-4 bg-green-200 border border-green-300 mr-1"></span>
                     可能人类写作
                   </span>
-                  <span className="inline-block">
+                  <span className="inline-block mr-4">
                     <span className="inline-block w-4 h-4 bg-yellow-200 border border-yellow-300 mr-1"></span>
                     不确定
+                  </span>
+                  <span className="inline-block">
+                    <span className="inline-block w-4 h-4 bg-gray-200 border border-gray-300 mr-1"></span>
+                    已跳过（网页代码）
                   </span>
                 </div>
                 <div className="space-y-4">
@@ -322,23 +370,27 @@ export default function Home() {
                     <div 
                       key={i} 
                       className={`p-4 rounded-lg border ${
-                        p.aiProbability > 70 
-                          ? 'bg-red-50 border-red-200' 
-                          : p.aiProbability > 40 
-                            ? 'bg-yellow-50 border-yellow-200' 
-                            : 'bg-green-50 border-green-200'
+                        p.skipped 
+                          ? 'bg-gray-50 border-gray-200'
+                          : p.aiProbability > 70 
+                            ? 'bg-red-50 border-red-200' 
+                            : p.aiProbability > 40 
+                              ? 'bg-yellow-50 border-yellow-200' 
+                              : 'bg-green-50 border-green-200'
                       }`}
                     >
                       <div className="flex justify-between items-center mb-2">
                         <span className="font-semibold text-gray-800">片段 {i + 1}</span>
                         <span className={`text-lg font-bold ${
-                          p.aiProbability > 70 
-                            ? 'text-red-600' 
-                            : p.aiProbability > 40 
-                              ? 'text-yellow-600' 
-                              : 'text-green-600'
+                          p.skipped 
+                            ? 'text-gray-500'
+                            : p.aiProbability > 70 
+                              ? 'text-red-600' 
+                              : p.aiProbability > 40 
+                                ? 'text-yellow-600' 
+                                : 'text-green-600'
                         }`}>
-                          {p.aiProbability}% AI
+                          {p.skipped ? '已跳过' : `${p.aiProbability}% AI`}
                         </span>
                       </div>
                       

@@ -7,7 +7,8 @@ import type { DetectionResult, ParagraphResult, ModelResult } from '@/types';
 // API配置
 const API_BASE_URL = process.env.API_BASE_URL || 'https://api.guyu.run';
 const API_KEY = process.env.API_KEY || '';
-const PROMPT_MODEL = process.env.PROMPT_MODEL || 'deepseek-v4-flash';
+// 支持多模型配置（分号分隔），取第一个作为默认模型
+const PROMPT_MODEL = (process.env.PROMPT_MODEL || 'deepseek-v4-flash').split(';')[0].trim();
 
 // 本地综合评分权重：统计特征（AI关键词最可靠）+ 拓扑分析
 const LOCAL_WEIGHTS = { stats: 0.6, topo: 0.4 };
@@ -25,6 +26,59 @@ function detectLocal(text: string): { perplexity: number; aiProbability: number 
     perplexity: 0,
     aiProbability: Math.max(0, Math.min(100, score))
   };
+}
+
+// 检测文本是否为网页代码（HTML/CSS/JavaScript/JSON等）
+function isWebCode(text: string): boolean {
+  // 常见的网页代码特征
+  const webCodePatterns = [
+    /<\s*[\w]+[^>]*>/,                                    // HTML标签
+    /<\/\s*[\w]+\s*>/,                                    // HTML闭合标签
+    /\b(function|const|let|var)\s+[\w]+\s*[=\(]/,        // JavaScript变量/函数声明
+    /\$\([^)]*\)\s*\./,                                   // jQuery
+    /\.\w+\s*\([^)]*\)/,                                 // 方法调用（不要求分号）
+    /{\s*"\w+"\s*:\s*[^}]+}/,                            // JSON对象
+    /\b(def |class |import |from |return )/i,            // Python代码特征
+    /\b(if|else|for|while)\s*\([^)]*\)\s*{/,             // 控制语句
+    /console\.(log|error|warn)\s*\(/,                    // console输出
+    /document\.\w+/,                                      // document对象（更宽松）
+    /window\.\w+/,                                        // window对象
+    /@media\s*\(/,                                        // CSS媒体查询
+    /\.\w+\s*{\s*\w+:\s*[^}]+;?\s*}/,                    // CSS样式块
+    /<!--.*-->/,                                          // HTML注释
+    /\/\*[\s\S]*?\*\//,                                   // 多行注释
+    /\bdata-\w+=/,                                        // data属性
+    /\bclass=["'][^"']+["']/,                            // class属性
+    /\bid=["'][^"']+["']/,                               // id属性
+    /\bhref=["'][^"']+["']/,                             // href属性
+    /\bsrc=["'][^"']+["']/,                              // src属性
+    /\bon\w+=["'][^"']+["']/,                            // 事件属性
+    /\.\w+\s*=\s*[^;]+;/,                                // 属性赋值
+    /\bpreventDefault\s*\(/,                             // 事件阻止默认行为
+    /\bgetRangeAt\s*\(/,                                 // Selection API
+    /\bcommonAncestorContainer\b/,                       // DOM Range API
+    /\bgetElementById\s*\(/,                             // DOM获取元素
+    /\bquerySelector\s*\(/,                              // DOM查询
+    /\baddEventListener\s*\(/,                           // 事件监听
+    /\bsetAttribute\s*\(/,                               // 设置属性
+    /\bappendChild\s*\(/,                                // 添加子节点
+    /\binnerHTML\b/,                                     // innerHTML属性
+    /\bouterHTML\b/,                                     // outerHTML属性
+    /\btextContent\b/,                                   // textContent属性
+  ];
+
+  // 计算匹配的模式数量
+  let matchCount = 0;
+  for (const pattern of webCodePatterns) {
+    if (pattern.test(text)) {
+      matchCount++;
+    }
+  }
+
+  // 如果匹配 2 个或以上模式，认为是网页代码
+  if (matchCount >= 2) return true;
+
+  return false;
 }
 
 // ----- 结构化 Prompt 模型判断 -----
@@ -148,9 +202,10 @@ ${text}`;
   const body: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 1500,  // 输出完整 JSON 需要
+    // 不限制 max_tokens，让模型完整输出
     temperature: 0.1,
-    response_format: { type: 'json_object' }
+    response_format: { type: 'json_object' },
+    reasoning_effort: 'low'  // 低推理强度，但某些模型可能不生效
   };
 
   const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
@@ -160,57 +215,92 @@ ${text}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(100000)  // 100秒超时
+    signal: AbortSignal.timeout(110000)  // 110秒超时
   });
 
-  try {
-    let response = await doFetch(body);
+  // 重试逻辑：500/502/503 是服务端临时错误，可重试
+  const MAX_RETRIES = 3;
+  let lastError: Error | null = null;
 
-    // 若 response_format 不被支持（可能返回400/500/503），移除该字段重试一次
-    if (response.status === 400 || response.status === 500 || response.status === 503) {
-      console.warn(`[Prompt检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
-      const bodyNoFmt = { ...body };
-      delete bodyNoFmt.response_format;
-      response = await doFetch(bodyNoFmt);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      let response = await doFetch(body);
+
+      // 若 response_format 不被支持（可能返回400/500/503），移除该字段重试
+      if (response.status === 400 || response.status === 500 || response.status === 503) {
+        console.warn(`[Prompt检测] 模型 ${modelId} 返回 ${response.status}，尝试移除 response_format 重试`);
+        const bodyNoFmt = { ...body };
+        delete bodyNoFmt.response_format;
+        response = await doFetch(bodyNoFmt);
+      }
+
+      if (!response.ok) {
+        // 尝试读取错误详情
+        let errorDetail = '';
+        try {
+          const errData = await response.json();
+          errorDetail = errData.error?.message || JSON.stringify(errData);
+        } catch { /* ignore */ }
+
+        // 如果是服务端错误，等待后重试
+        if ((response.status === 500 || response.status === 502 || response.status === 503) && attempt < MAX_RETRIES) {
+          console.warn(`[Prompt检测] 服务端错误 ${response.status}，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
+        throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
+      }
+
+      const data = await response.json();
+      
+      // 智能提取最终结果（过滤推理过程）
+      let content = data.choices?.[0]?.message?.content || '';
+      
+      // 检查是否有 reasoning_content 字段（推理模型的特殊字段）
+      const reasoningContent = data.choices?.[0]?.message?.reasoning_content;
+      if (reasoningContent) {
+        console.log(`[Prompt检测] 检测到推理过程，长度 ${reasoningContent.length} 字符，已过滤`);
+      }
+
+      // 打印完整响应用于调试
+      if (!content) {
+        console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
+        throw new Error('模型返回空内容');
+      }
+
+      console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content}`);
+
+      const parsed = parseModelJson(content);
+      if (parsed === null) {
+        throw new Error('无法解析模型返回的评分');
+      }
+
+      return {
+        aiProbability: clamp(parsed.score, 0, 100),
+        reason: parsed.reason || '模型判断',
+        signals: parsed.signals,
+        suggestions: parsed.suggestions
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      // 只对服务端错误和超时重试
+      if (lastError.message.includes('500') || lastError.message.includes('502') ||
+          lastError.message.includes('503') || lastError.message.includes('timeout')) {
+        if (attempt < MAX_RETRIES) {
+          console.warn(`[Prompt检测] 错误，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+      } else {
+        // 其他错误直接抛出
+        throw error;
+      }
     }
-
-    if (!response.ok) {
-      // 尝试读取错误详情
-      let errorDetail = '';
-      try {
-        const errData = await response.json();
-        errorDetail = errData.error?.message || JSON.stringify(errData);
-      } catch { /* ignore */ }
-      console.error(`[Prompt检测] API请求失败: ${response.status} ${errorDetail}`);
-      throw new Error(`API请求失败: ${response.status} ${errorDetail}`);
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
-    
-    // 打印完整响应用于调试
-    if (!content) {
-      console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
-      throw new Error('模型返回空内容');
-    }
-    
-    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content}`);
-
-    const parsed = parseModelJson(content);
-    if (parsed === null) {
-      throw new Error('无法解析模型返回的评分');
-    }
-
-    return {
-      aiProbability: clamp(parsed.score, 0, 100),
-      reason: parsed.reason || '模型判断',
-      signals: parsed.signals,
-      suggestions: parsed.suggestions
-    };
-  } catch (error) {
-    console.error('[Prompt检测] 异常:', error);
-    throw error;
   }
+
+  throw lastError || new Error('模型检测失败');
 }
 
 // 一致性纠偏：综合模型评分与本地评分
@@ -264,12 +354,13 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
     }
   } catch { /* 继续 */ }
 
-  // Step 2: 截取最外层 [ ... ]
+  // Step 2: 截取最外层 [ ... ]（处理推理输出后跟着 JSON 的情况）
   const firstBracket = cleaned.indexOf('[');
   const lastBracket = cleaned.lastIndexOf(']');
   if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
     try {
-      const arr = JSON.parse(cleaned.substring(firstBracket, lastBracket + 1));
+      const jsonStr = cleaned.substring(firstBracket, lastBracket + 1);
+      const arr = JSON.parse(jsonStr);
       if (Array.isArray(arr)) {
         for (const item of arr) {
           if (item && typeof item.index === 'number' && typeof item.score === 'number') {
@@ -286,7 +377,6 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
   }
 
   // Step 3: 尝试包装成数组（处理 "{...}, {...}, {...}" 格式）
-  // 移除首尾逗号，加上方括号
   const trimmed = cleaned.trim().replace(/^,+\s*/, '').replace(/,+\s*$/, '');
   if (trimmed.startsWith('{')) {
     try {
@@ -306,17 +396,39 @@ function parseBatchResponse(content: string): Map<number, { score: number; reaso
     } catch { /* 继续 */ }
   }
 
-  // Step 4: 逐对象正则提取（处理多行 JSON 对象）
-  // 匹配 { ... "index": N ... "score": M ... } 格式，支持多行
+  // Step 4: 从推理输出中提取片段评分（针对 mimo-v2.5 等推理模型）
+  // 匹配类似 "片段1: score 15" 或 "index 1: score 15" 的模式
+  const reasoningPatterns = [
+    /片段\s*(\d+)[：:]\s*[^0-9]*(\d{1,3})\s*[%分]?/gi,
+    /index\s*[：:]?\s*(\d+)[^0-9]*(\d{1,3})\s*[%分]?/gi,
+    /["']index["']\s*[：:]\s*(\d+).*?["']score["']\s*[：:]\s*(\d{1,3})/gi
+  ];
+
+  for (const pattern of reasoningPatterns) {
+    let m: RegExpExecArray | null;
+    pattern.lastIndex = 0;  // 重置正则索引
+    while ((m = pattern.exec(cleaned)) !== null) {
+      const idx = parseInt(m[1], 10);
+      const score = clamp(parseInt(m[2], 10), 0, 100);
+      if (idx > 0 && idx <= 100) {  // 合理的片段索引范围
+        result.set(idx, {
+          score,
+          reason: '从推理输出中提取',
+          suggestions: []
+        });
+      }
+    }
+    if (result.size > 0) return result;
+  }
+
+  // Step 5: 逐对象正则提取（处理多行 JSON 对象）
   const objRegex = /\{[\s\S]*?"index"\s*:\s*(\d+)[\s\S]*?"score"\s*:\s*(\d+)[\s\S]*?\}/g;
   let m: RegExpExecArray | null;
   while ((m = objRegex.exec(cleaned)) !== null) {
     const idx = parseInt(m[1], 10);
     const score = clamp(parseInt(m[2], 10), 0, 100);
-    // 提取 reason（可能跨行，用非贪婪匹配）
     const reasonMatch = m[0].match(/"reason"\s*:\s*"([\s\S]*?)"/);
     const reason = reasonMatch ? reasonMatch[1].replace(/\\n/g, ' ').substring(0, 200) : '';
-    // 提取 suggestions（数组格式）
     const suggestionsMatch = m[0].match(/"suggestions"\s*:\s*\[([\s\S]*?)\]/);
     let suggestions: string[] = [];
     if (suggestionsMatch) {
@@ -338,57 +450,44 @@ async function callBatchParagraphModel(
   if (!API_KEY || chunks.length === 0) return new Map();
 
   const fragments = chunks.map(ch => `【片段${ch.index}】\n${ch.text}`).join('\n\n');
-  const prompt = `你是AI文本检测专家。下面有 ${chunks.length} 个文本片段，逐个判断是否AI生成。
 
-【重要】直接输出JSON数组，不要输出任何推理过程或分析。
+  const systemPrompt = `你是AI文本检测专家。直接输出JSON数组，不要推理过程。
 
-【核心原则】
-1. 文笔好≠AI生成。人类优秀文章也可能结构严谨、用词规范。不要因为这些就判高分。
-2. 唯一可靠的高分信号是"AI模板词"高频出现 + 句式高度套路化。仅在确凿证据下才给高分（>60）。
-3. 出现以下任何一种"人类痕迹"，倾向判低分（<40）：
-   - 个人经历 / 具体事例 / 具体地名 / 具体人物 / 具体时间
-   - 主观情感 / 口语化表达 / 方言 / 俚语 / 自嘲
-   - 句式不规整（短句、断句、倒装、反问、感叹句）
-   - 感叹号、省略号、破折号等情感标点
+【禁止事项】
+- 禁止输出推理过程、分析步骤、思考内容
+- 禁止输出任何解释性文字
+- 禁止使用 <think> 或其他标记
 
-【AI模板词清单（强信号）】
-- 列举式：首先 / 其次 / 再次 / 然后 / 接着 / 最后
-- 总结式：综上所述 / 由此可见 / 总而言之 / 总的来说 / 综上
-- 转折套路：值得注意的是 / 需要指出的是 / 值得一提的是 / 不可否认
-- 对比式：不仅...而且 / 一方面...另一方面 / 既...又
+【必须格式】
+[{"index": N, "score": 0-100, "reason": "一句话", "suggestions": []}]
 
-【自然连接词不算AI信号】所以、因此、由于、因为、但是、然而、不过、同时、开始、负责、能够、通过、进行——这些是中文正常词汇，不能仅凭它们判高分。
+【关键规则】
+1. 立即输出JSON数组，不要任何前置内容
+2. index 必须与【片段N】的编号N一致
+3. score < 40 时 suggestions 为空数组
+4. score >= 40 时给出1-2条修改建议`;
 
-【评分尺度】
-- 0-20：明显人类（口语化、有具体事例/情感）
-- 20-40：可能人类（有人类痕迹但文笔不错）
-- 40-60：模糊（无明显AI模板词，也无明显人类痕迹）
-- 60-80：偏AI（出现AI模板词但混入部分人类风格）
-- 80-100：高AI（大量AI模板词 + 句式极度规整）
+  const userPrompt = `立即输出这 ${chunks.length} 个片段的AI概率评分（JSON数组）：
 
-【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致：
-[
-  {"index": 1, "score": 0到100整数, "reason": "一句话依据", "suggestions": ["修改建议1", "修改建议2"]},
-  {"index": 2, "score": ..., "reason": ..., "suggestions": ...}
-]
+${fragments}
 
-【修改建议规则】
-- score < 40：suggestions 为空数组，因为片段已足够自然
-- score >= 40：给出1-2条具体、可操作的修改建议
-
-${fragments}`;
+现在立即输出JSON数组：`;
 
   const body: Record<string, unknown> = {
     model: modelId,
-    messages: [{ role: 'user', content: prompt }],
-    // 动态计算：每个片段约 150 tokens 输出 + 基础 500 tokens
-    max_tokens: 150 * chunks.length + 500,
-    temperature: 0.1
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    // 不限制 max_tokens，让模型完整输出
+    // max_tokens: 不设置，使用 API 默认值或无限制
+    temperature: 0.1,
+    reasoning_effort: 'low'  // 低推理强度，但某些模型可能不生效
     // 注意：不使用 response_format，因为我们需要数组格式，json_object 要求对象格式
   };
 
   // 打印请求体大小用于调试
-  const promptLength = prompt.length;
+  const promptLength = systemPrompt.length + userPrompt.length;
   console.log(`[段落检测] ${chunks.length} 个片段，prompt 长度 ${promptLength} 字符，max_tokens ${body.max_tokens}`);
 
   const doFetch = (b: Record<string, unknown>) => fetch(`${API_BASE_URL}/v1/chat/completions`, {
@@ -398,11 +497,11 @@ ${fragments}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(90000)  // 90秒超时（留10秒给EdgeOne边缘节点）
+    signal: AbortSignal.timeout(110000)  // 110秒超时
   });
 
-  // 重试逻辑：524是边缘节点超时，可重试
-  const MAX_RETRIES = 2;
+  // 重试逻辑：500/502/503/524 是服务端临时错误，可重试
+  const MAX_RETRIES = 3;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -416,10 +515,10 @@ ${fragments}`;
           errorDetail = JSON.stringify(errData);
         } catch { /* ignore */ }
 
-        // 如果是 524 超时错误，重试
-        if (response.status === 524 && attempt < MAX_RETRIES) {
-          console.warn(`[段落检测] 524超时，第 ${attempt} 次重试...`);
-          await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒后重试
+        // 如果是服务端错误，等待后重试
+        if ((response.status === 500 || response.status === 502 || response.status === 503 || response.status === 524) && attempt < MAX_RETRIES) {
+          console.warn(`[段落检测] 服务端错误 ${response.status}，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
 
@@ -428,22 +527,33 @@ ${fragments}`;
       }
 
       const data = await response.json();
-      const content = data.choices?.[0]?.message?.content || '';
+      
+      // 智能提取最终结果（过滤推理过程）
+      let content = data.choices?.[0]?.message?.content || '';
+      
+      // 检查是否有 reasoning_content 字段（推理模型的特殊字段）
+      const reasoningContent = data.choices?.[0]?.message?.reasoning_content;
+      if (reasoningContent) {
+        console.log(`[段落检测] 检测到推理过程，长度 ${reasoningContent.length} 字符，已过滤`);
+      }
 
       // 打印完整响应用于调试
       if (!content) {
         console.error(`[段落检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data));
         throw new Error('模型返回空内容');
       }
+      
       console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
-
+      
       return parseBatchResponse(content);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      // 只对超时类错误重试
-      if (lastError.message.includes('524') || lastError.message.includes('timeout')) {
+      // 对服务端错误和超时重试
+      if (lastError.message.includes('500') || lastError.message.includes('502') ||
+          lastError.message.includes('503') || lastError.message.includes('524') ||
+          lastError.message.includes('timeout')) {
         if (attempt < MAX_RETRIES) {
-          console.warn(`[段落检测] 超时错误，第 ${attempt} 次重试...`);
+          console.warn(`[段落检测] 错误，第 ${attempt} 次重试...`);
           await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
@@ -458,23 +568,41 @@ ${fragments}`;
 }
 
 // 段落级检测（全文标注，支持多模型并行）
-export async function detectParagraphs(text: string, modelIds: string | string[] = PROMPT_MODEL): Promise<ParagraphResult[]> {
+export async function detectParagraphs(
+  text: string,
+  modelIds: string | string[] = PROMPT_MODEL,
+  options?: {
+    preFilteredSentences?: SentenceInfo[];  // 预过滤的句子列表（可选）
+  }
+): Promise<ParagraphResult[]> {
   // 统一处理为模型数组
   const modelList = Array.isArray(modelIds) ? modelIds : [modelIds];
   
-  // 句子分割 + 位置追踪
-  const sentences: SentenceInfo[] = [];
-  const re = /[^。！？\n]+[。！？\n]?/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const s = m[0].trim();
-    if (s.length >= 10) {
-      sentences.push({ text: s, start: m.index, end: m.index + m[0].length });
+  // 如果提供了预过滤句子，直接使用；否则重新分割
+  let sentences: SentenceInfo[];
+  
+  if (options?.preFilteredSentences && options.preFilteredSentences.length > 0) {
+    // 使用主检测已过滤的句子（已排除网页代码）
+    sentences = options.preFilteredSentences;
+    console.log(`[段落检测] 使用预过滤句子，共 ${sentences.length} 个片段`);
+  } else {
+    // 原有逻辑：句子分割 + 网页代码过滤
+    const allSentences: SentenceInfo[] = [];
+    const re = /[^。！？\n]+[。！？\n]?/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const s = m[0].trim();
+      if (s.length >= 10) {
+        allSentences.push({ text: s, start: m.index, end: m.index + m[0].length });
+      }
     }
+    
+    // 过滤网页代码
+    sentences = allSentences.filter(s => !isWebCode(s.text));
+    console.log(`[段落检测] 原始 ${allSentences.length} 个片段，过滤后 ${sentences.length} 个`);
   }
 
   if (sentences.length === 0) {
-    // 无法分割，抛出错误
     throw new Error('无法分割文本进行段落检测');
   }
 
@@ -495,62 +623,112 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 调用单个模型，分批处理（每批最多 3 个片段，减少超时风险）
-  const BATCH_SIZE = 3;
-  const allResults = new Map<number, { score: number; reason: string; suggestions: string[] }>();
+  console.log(`[段落检测] 共 ${chunks.length} 个片段`);
 
+  // 单模型分批并行调用（避免串行叠加超时）
+  const modelId = modelList[0];  // 使用第一个模型
+  const BATCH_SIZE = 3;  // 每批最多3个片段
+  const batches: ChunkInfo[][] = [];
+
+  // 划分批次（余下的片段自动成为最后一批）
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-    const batch = chunks.slice(i, i + BATCH_SIZE);
-    console.log(`[段落检测] 批次 ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)}，片段 ${batch[0].index}-${batch[batch.length - 1].index}`);
+    batches.push(chunks.slice(i, i + BATCH_SIZE));
+  }
+  console.log(`[段落检测] 使用模型 ${modelId}，共 ${chunks.length} 个片段，分 ${batches.length} 批并行`);
 
-    try {
-      const batchResult = await callBatchParagraphModel(batch, modelList[0]);
-
-      // 合并结果
-      batchResult.forEach((val, idx) => {
-        allResults.set(idx, val);
+  // 并行请求所有批次
+  const batchPromises = batches.map((batch, batchIndex) => {
+    const startTime = Date.now();
+    console.log(`[段落检测] [${new Date().toISOString()}] 启动批次 ${batchIndex + 1}/${batches.length}，片段 ${batch[0].index}-${batch[batch.length - 1].index}`);
+    return callBatchParagraphModel(batch, modelId)
+      .then(result => {
+        const elapsed = Date.now() - startTime;
+        console.log(`[段落检测] [${new Date().toISOString()}] 批次 ${batchIndex + 1} 完成，耗时 ${elapsed}ms`);
+        return { batchIndex, result, error: null };
+      })
+      .catch(error => {
+        const elapsed = Date.now() - startTime;
+        console.warn(`[段落检测] [${new Date().toISOString()}] 批次 ${batchIndex + 1} 失败 (耗时 ${elapsed}ms):`, error.message);
+        return { batchIndex, result: null, error };
       });
-    } catch (error) {
-      // 段落检测失败不影响整体检测，记录警告并跳过该批次
-      console.warn(`[段落检测] 批次检测失败，跳过该批次:`, error);
-      // 为失败的片段设置默认值
+  });
+
+  // 等待所有批次完成
+  const batchResults = await Promise.all(batchPromises);
+
+  // 合并结果
+  const allResults = new Map<number, { score: number; reason: string; suggestions: string[] }>();
+  batchResults.forEach(({ batchIndex, result, error }) => {
+    const batch = batches[batchIndex];
+    console.log(`[段落检测] 处理批次 ${batchIndex + 1}，成功: ${!!result}，错误: ${error ? error.message : '无'}`);
+    if (result) {
+      console.log(`[段落检测] 批次 ${batchIndex + 1} 返回 ${result.size} 个结果`);
+      
+      // 检查模型返回的 index 是否在批次范围内
+      const batchIndices = batch.map(ch => ch.index);
+      const returnedIndices = Array.from(result.keys());
+      const indicesMatch = returnedIndices.every(idx => batchIndices.includes(idx));
+      
+      if (!indicesMatch && returnedIndices.length === batch.length) {
+        // index 不匹配但数量一致，按位置映射
+        console.log(`[段落检测] 批次 ${batchIndex + 1} index 不匹配，按位置映射`);
+        returnedIndices.forEach((returnedIdx, position) => {
+          const actualIdx = batchIndices[position];
+          const val = result.get(returnedIdx);
+          if (val) {
+            console.log(`[段落检测] 映射片段 ${returnedIdx} → ${actualIdx}，score=${val.score}`);
+            allResults.set(actualIdx, val);
+          }
+        });
+      } else {
+        // index 匹配或无法映射，直接使用
+        result.forEach((val, idx) => {
+          console.log(`[段落检测] 存储片段 ${idx} 的结果: score=${val.score}`);
+          allResults.set(idx, val);
+        });
+      }
+    } else {
+      // 批次失败，使用本地评分
+      console.log(`[段落检测] 批次 ${batchIndex + 1} 失败，使用本地评分降级`);
       batch.forEach(ch => {
+        const { aiProbability } = detectLocal(ch.text);
         allResults.set(ch.index, {
-          score: 50,
-          reason: '段落检测超时，使用默认评分',
+          score: aiProbability,
+          reason: '模型检测失败，使用本地评分',
           suggestions: []
         });
       });
     }
-  }
-
-  // 检查是否所有片段都有结果
-  const missingChunks = chunks.filter(ch => !allResults.has(ch.index));
-  if (missingChunks.length > 0) {
-    console.warn(`[段落检测] 部分片段未返回结果，使用默认值: ${missingChunks.map(c => c.index).join(', ')}`);
-    // 为缺失片段设置默认值，而不是抛出错误
-    missingChunks.forEach(ch => {
-      allResults.set(ch.index, {
-        score: 50,
-        reason: '检测超时，使用默认评分',
-        suggestions: []
-      });
-    });
-  }
+  });
+  console.log(`[段落检测] 合并完成，共 ${allResults.size} 个结果`);
 
   // 组装结果
   return chunks.map(ch => {
-    const r = allResults.get(ch.index)!;
-    
-    return {
-      paragraph: ch.text,
-      startIndex: ch.start,
-      endIndex: ch.end,
-      aiProbability: r.score,
-      isAI: r.score > 60,
-      reason: r.reason || '模型判断',
-      suggestions: r.suggestions
-    };
+    const r = allResults.get(ch.index);
+
+    if (r) {
+      return {
+        paragraph: ch.text,
+        startIndex: ch.start,
+        endIndex: ch.end,
+        aiProbability: r.score,
+        isAI: r.score > 60,
+        reason: r.reason || '模型判断',
+        suggestions: r.suggestions
+      };
+    } else {
+      // 缺失片段降级到本地评分
+      const { aiProbability } = detectLocal(ch.text);
+      return {
+        paragraph: ch.text,
+        startIndex: ch.start,
+        endIndex: ch.end,
+        aiProbability,
+        isAI: aiProbability > 60,
+        reason: '模型未返回结果，使用本地评分',
+        suggestions: []
+      };
+    }
   });
 }
 
@@ -629,15 +807,59 @@ export async function detectAIContent(
   console.log('[检测] 开始检测, 模型:', modelId);
 
   try {
-    // 1. 本地评分
-    const stats = analyzeStatistics(text);
-    const topo = analyzeTopology(text);
+    // 0. 过滤网页代码片段（带位置信息）
+    const sentencesWithPos: SentenceInfo[] = [];
+    const re = /[^。！？\n]+[。！？\n]?/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const s = m[0].trim();
+      if (s.length >= 10) {
+        sentencesWithPos.push({ 
+          text: s, 
+          start: m.index, 
+          end: m.index + m[0].length,
+          isWebCode: isWebCode(s) 
+        } as SentenceInfo & { isWebCode: boolean });
+      }
+    }
+    
+    // 过滤网页代码
+    const normalSentences = sentencesWithPos.filter(s => !(s as any).isWebCode);
+    const webCodeSentences = sentencesWithPos.filter(s => (s as any).isWebCode);
+    
+    // 过滤后的文本（移除网页代码）
+    const filteredText = normalSentences.map(s => s.text).join('');
+    
+    if (webCodeSentences.length > 0) {
+      console.log(`[检测] 过滤 ${webCodeSentences.length} 个网页代码片段，剩余 ${normalSentences.length} 个正常片段`);
+    }
+    
+    // 如果过滤后文本为空，使用原文（避免完全无法检测）
+    const textForDetection = filteredText.length > 50 ? filteredText : text;
+
+    // 1. 本地评分（使用过滤后的文本）
+    const stats = analyzeStatistics(textForDetection);
+    const topo = analyzeTopology(textForDetection);
     const localScore = Math.round(stats.overallScore * LOCAL_WEIGHTS.stats + topo.overallScore * LOCAL_WEIGHTS.topo);
     const perplexity = 0;
 
-    // 2. 调用模型深度判断
-    console.log('[检测] 调用模型深度判断...');
-    const promptResult = await callModelPrompt(text, modelId);
+    // 2. 并行执行：模型深度判断 + 段落级检测
+    console.log('[检测] 并行调用模型深度判断和段落检测...');
+    
+    const [promptResult, paragraphResults] = await Promise.all([
+      // 主检测模型调用
+      callModelPrompt(textForDetection, modelId),
+      
+      // 段落级检测（可选）
+      enableParagraphDetection && normalSentences.length > 0
+        ? detectParagraphs(text, [modelId], {
+            preFilteredSentences: normalSentences as SentenceInfo[]
+          }).catch(error => {
+            console.error('[检测] 段落级检测失败:', error);
+            return undefined;
+          })
+        : Promise.resolve(undefined)
+    ]);
 
     // 3. 构造 modelResults
     const modelConfig = getModelConfig(modelId);
@@ -674,23 +896,13 @@ export async function detectAIContent(
     // 7. 生成分析说明
     const analysis = generateAnalysis(aiProbability, perplexity, stats, modelResults, topo, promptScore);
 
-    // 8. 段落级检测（可选）
-    let paragraphResults: ParagraphResult[] | undefined;
-    if (enableParagraphDetection && text.length > 200) {
-      try {
-        paragraphResults = await detectParagraphs(text, [modelId]);
-      } catch (error) {
-        console.error('[检测] 段落级检测失败:', error);
-      }
-    }
-
-    // 9. AI来源识别（可选）
+    // 8. AI来源识别（可选，使用过滤后的文本）
     let sourceIdentification;
     if (enableSourceIdentification) {
-      sourceIdentification = identifyAISource(text);
+      sourceIdentification = identifyAISource(textForDetection);
     }
 
-    // 10. 修改建议（可选，从模型返回中获取）
+    // 9. 修改建议（可选，从模型返回中获取）
     let suggestions: string[] | undefined;
     if (enableSuggestions) {
       suggestions = promptResult.suggestions;

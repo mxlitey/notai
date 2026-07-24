@@ -40,6 +40,7 @@ export interface ParagraphResult {
   reason?: string;        // 模型给出的评价
   suggestions?: string[]; // 针对该段的修改建议
   modifiedText?: string;  // 修改后的文本示例
+  skipped?: boolean;      // 是否跳过检测（如网页代码）
 }
 
 // 模型检测结果
