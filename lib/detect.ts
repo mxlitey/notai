@@ -194,7 +194,7 @@ ${text}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(150000)  // 150秒超时
+    signal: AbortSignal.timeout(100000)  // 100秒超时
   });
 
   try {
@@ -439,7 +439,7 @@ ${fragments}`;
       'Authorization': `Bearer ${API_KEY}`
     },
     body: JSON.stringify(b),
-    signal: AbortSignal.timeout(150000)  // 150秒超时
+    signal: AbortSignal.timeout(100000)  // 100秒超时
   });
 
   try {
