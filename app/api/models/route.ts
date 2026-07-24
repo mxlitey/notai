@@ -1,17 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { verifyToken } from '@/lib/auth';
+import { NextResponse } from 'next/server';
 import { getAvailableModels, getDefaultModel } from '@/lib/detect';
 
-export async function GET(request: NextRequest) {
-  try {
-    // 验证token（可选，如果需要公开模型列表可以移除验证）
-    const token = request.headers.get('authorization')?.replace('Bearer ', '');
-    
-    // 如果需要验证，取消下面的注释
-    // if (!token || !(await verifyToken(token))) {
-    //   return NextResponse.json({ success: false, error: '未授权' }, { status: 401 });
-    // }
+// 强制动态渲染
+export const dynamic = 'force-dynamic';
 
+export async function GET() {
+  try {
     const models = getAvailableModels();
     const defaultModel = getDefaultModel();
 
