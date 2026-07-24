@@ -580,16 +580,17 @@ async function callBatchParagraphModel(
 【禁止事项】
 - 禁止输出推理过程、分析步骤、思考内容
 - 禁止输出任何解释性文字
-- 禁止使用 <think> 或其他标记
+- 禁止使用 ម 或其他标记
 
 【必须格式】
-[{"index": N, "score": 0-100, "reason": "一句话", "suggestions": []}]
+[{"index": N, "score": 0-100, "reason": "一句话", "signals": ["信号1","信号2"], "suggestions": []}]
 
 【关键规则】
 1. 立即输出JSON数组，不要任何前置内容
 2. index 必须与【片段N】的编号N一致
-3. score < 40 时 suggestions 为空数组
-4. score >= 40 时给出1-2条修改建议`;
+3. signals 是检测到的特征数组，如："具体人物"、"真实地名"、"AI模板词"、"口语化表达"、"个人经历"等
+4. score < 40 时 suggestions 为空数组
+5. score >= 40 时给出1-2条修改建议`;
 
   const userPrompt = `立即输出这 ${chunks.length} 个片段的AI概率评分（JSON数组）：
 
@@ -669,7 +670,13 @@ ${fragments}
       
       console.log(`[段落检测] 模型 ${modelId} 返回: ${content}`);
       
-      return parseBatchResponse(content);
+      const parsed = parseBatchResponse(content);
+      console.log(`[段落检测] 解析结果: ${parsed.size} 个片段`);
+      parsed.forEach((val, idx) => {
+        console.log(`  片段 ${idx}: score=${val.score}, signals=${JSON.stringify(val.signals)}, suggestions=${JSON.stringify(val.suggestions)}`);
+      });
+      
+      return parsed;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       // 对服务端错误和超时重试
@@ -781,7 +788,7 @@ export async function detectParagraphs(
   const batchResults = await Promise.all(batchPromises);
 
   // 合并结果
-  const allResults = new Map<number, { score: number; reason: string; suggestions: string[] }>();
+  const allResults = new Map<number, { score: number; reason: string; signals: string[]; suggestions: string[] }>();
   batchResults.forEach(({ batchIndex, result, error }) => {
     const batch = batches[batchIndex];
     console.log(`[段落检测] 处理批次 ${batchIndex + 1}，成功: ${!!result}，错误: ${error ? error.message : '无'}`);
@@ -832,6 +839,7 @@ export async function detectParagraphs(
     const r = allResults.get(ch.index);
 
     if (r) {
+      console.log(`[段落检测] 片段 ${ch.index} 结果: score=${r.score}, signals=${JSON.stringify(r.signals)}, suggestions=${JSON.stringify(r.suggestions)}`);
       return {
         paragraph: ch.text,
         startIndex: ch.start,
