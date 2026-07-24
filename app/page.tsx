@@ -340,7 +340,7 @@ export default function Home() {
       });
       
       // iOS Safari 不支持 download 属性，使用 Web Share API
-      if (navigator.share && navigator.canShare) {
+      if (navigator.share) {
         // 转换为 Blob
         const blob = await new Promise<Blob>((resolve) => {
           canvas.toBlob((b) => resolve(b!), 'image/png');
@@ -729,13 +729,9 @@ export default function Home() {
                         <span className="inline-block w-4 h-4 bg-green-200 dark:bg-green-800 border border-green-300 dark:border-green-600 mr-1"></span>
                         可能人类写作
                       </span>
-                      <span className="inline-block mr-4">
+                      <span className="inline-block">
                         <span className="inline-block w-4 h-4 bg-yellow-200 dark:bg-yellow-800 border border-yellow-300 dark:border-yellow-600 mr-1"></span>
                         不确定
-                      </span>
-                      <span className="inline-block">
-                        <span className="inline-block w-4 h-4 bg-gray-200 dark:bg-gray-600 border border-gray-300 dark:border-gray-500 mr-1"></span>
-                        已跳过（网页代码）
                       </span>
                     </div>
                     <div className="space-y-4">
@@ -743,31 +739,27 @@ export default function Home() {
                     <div 
                       key={i} 
                       className={`p-4 rounded-lg border ${
-                        p.skipped 
-                          ? 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'
-                          : p.aiProbability === 0
-                            ? 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'  // 未分析完成
-                            : p.aiProbability > 70 
-                              ? 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800' 
-                              : p.aiProbability > 40 
-                                ? 'bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800' 
-                                : 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800'
+                        p.aiProbability === 0
+                          ? 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'  // 未分析完成
+                          : p.aiProbability > 70 
+                            ? 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800' 
+                            : p.aiProbability > 40 
+                              ? 'bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800' 
+                              : 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800'
                       }`}
                     >
                       <div className="flex justify-between items-center mb-2">
                         <span className="font-semibold text-gray-800 dark:text-gray-200">片段 {i + 1}</span>
                         <span className={`text-lg font-bold ${
-                          p.skipped 
-                            ? 'text-gray-500 dark:text-gray-400'
-                            : p.aiProbability === 0
-                              ? 'text-gray-400'  // 未分析完成
-                              : p.aiProbability > 70 
-                                ? 'text-red-600' 
-                                : p.aiProbability > 40 
-                                  ? 'text-yellow-600' 
-                                  : 'text-green-600'
+                          p.aiProbability === 0
+                            ? 'text-gray-400'  // 未分析完成
+                            : p.aiProbability > 70 
+                              ? 'text-red-600' 
+                              : p.aiProbability > 40 
+                                ? 'text-yellow-600' 
+                                : 'text-green-600'
                         }`}>
-                          {p.skipped ? '已跳过' : p.aiProbability === 0 ? (
+                          {p.aiProbability === 0 ? (
                             <span className="flex items-center gap-2 text-sm">
                               <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-500"></div>
                               <span>分析中...</span>
@@ -1075,13 +1067,6 @@ export default function Home() {
                       <div style={{ fontSize: '13px', color: '#374151', lineHeight: '1.5' }}>
                         {para.suggestions.join('；')}
                       </div>
-                    </div>
-                  )}
-
-                  {/* 跳过标记 */}
-                  {para.skipped && (
-                    <div style={{ marginTop: '10px', fontSize: '12px', color: '#9ca3af', fontStyle: 'italic' }}>
-                      此片段已跳过检测
                     </div>
                   )}
                 </div>
