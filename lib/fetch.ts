@@ -92,30 +92,75 @@ function extractMainContent(html: string): string {
   text = text.replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '');
   text = text.replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '');
   text = text.replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, '');
+  text = text.replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '');
+  text = text.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
 
-  // 尝试提取article标签内容
+  // 尝试按优先级提取正文
+  let content = '';
+  
+  // 1. 尝试提取article标签内容
   const articleMatch = text.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
   if (articleMatch) {
-    text = articleMatch[1];
-  } else {
-    // 尝试提取main标签内容
+    content = articleMatch[1];
+  }
+  
+  // 2. 尝试提取main标签内容
+  if (!content) {
     const mainMatch = text.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
     if (mainMatch) {
-      text = mainMatch[1];
+      content = mainMatch[1];
     }
+  }
+  
+  // 3. 尝试提取class包含content/post/entry的div
+  if (!content) {
+    const contentDivMatch = text.match(/<div[^>]*class="[^"]*(?:content|post|entry|article)[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    if (contentDivMatch) {
+      content = contentDivMatch[1];
+    }
+  }
+  
+  // 4. 尝试提取id包含content的div
+  if (!content) {
+    const contentIdMatch = text.match(/<div[^>]*id="[^"]*(?:content)[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    if (contentIdMatch) {
+      content = contentIdMatch[1];
+    }
+  }
+  
+  // 5. 如果以上都没有，使用整个页面
+  if (!content) {
+    content = text;
   }
 
   // 移除所有HTML标签
-  text = text.replace(/<br\s*\/?>/gi, '\n');
-  text = text.replace(/<[^>]+>/g, ' ');
+  content = content.replace(/<br\s*\/?>/gi, '\n');
+  content = content.replace(/<\/p>/gi, '\n');
+  content = content.replace(/<\/div>/gi, '\n');
+  content = content.replace(/<[^>]+>/g, ' ');
 
   // 解码HTML实体
-  text = decodeHtmlEntities(text);
+  content = decodeHtmlEntities(content);
 
   // 清理空白字符
-  text = text.replace(/\s+/g, ' ').trim();
+  content = content.replace(/[ \t]+/g, ' ');
+  content = content.replace(/\n\s*\n+/g, '\n\n');
+  content = content.trim();
 
-  return text;
+  // 验证提取结果：如果HTML标签残留过多，说明提取失败
+  const htmlTagCount = (content.match(/<[a-zA-Z][^>]*>/g) || []).length;
+  const textLength = content.length;
+  
+  // 如果HTML标签密度过高（每100字符超过5个标签），可能是原始HTML
+  if (htmlTagCount > 0 && textLength > 100 && htmlTagCount / (textLength / 100) > 5) {
+    console.warn(`[URL抓取] 警告：提取结果可能包含大量HTML标签 (${htmlTagCount}个标签)`);
+    // 尝试更激进地移除所有尖括号内容
+    content = content.replace(/<[^>]+>/g, '');
+    content = content.replace(/[ \t]+/g, ' ');
+    content = content.trim();
+  }
+
+  return content;
 }
 
 // 解码HTML实体

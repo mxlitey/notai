@@ -469,12 +469,24 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
     chunks.push({ index: chunks.length + 1, text: chunkText, start, end });
   }
 
-  // 调用单个模型
-  console.log(`[段落检测] 调用模型 ${modelList[0]} 检测...`);
-  const batchResult = await callBatchParagraphModel(chunks, modelList[0]);
+  // 调用单个模型，分批处理（每批最多 5 个片段，避免模型服务端 500 错误）
+  const BATCH_SIZE = 5;
+  const allResults = new Map<number, { score: number; reason: string; suggestions: string[] }>();
+  
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+    console.log(`[段落检测] 批次 ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)}，片段 ${batch[0].index}-${batch[batch.length - 1].index}`);
+    
+    const batchResult = await callBatchParagraphModel(batch, modelList[0]);
+    
+    // 合并结果
+    batchResult.forEach((val, idx) => {
+      allResults.set(idx, val);
+    });
+  }
 
   // 检查是否所有片段都有结果
-  const missingChunks = chunks.filter(ch => !batchResult.has(ch.index));
+  const missingChunks = chunks.filter(ch => !allResults.has(ch.index));
   if (missingChunks.length > 0) {
     console.error(`[段落检测] 部分片段未返回结果: ${missingChunks.map(c => c.index).join(', ')}`);
     throw new Error(`部分片段检测失败，请重试`);
@@ -482,7 +494,7 @@ export async function detectParagraphs(text: string, modelIds: string | string[]
 
   // 组装结果
   return chunks.map(ch => {
-    const r = batchResult.get(ch.index)!;
+    const r = allResults.get(ch.index)!;
     
     return {
       paragraph: ch.text,
