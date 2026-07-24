@@ -103,6 +103,11 @@ async function callModelPrompt(text: string, modelId: string = PROMPT_MODEL): Pr
 
   // 文本截断（控制token消耗）
   const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text;
+  
+  // 打印截断信息
+  if (text.length > 2000) {
+    console.log(`[Prompt检测] 文章长度 ${text.length}，已截断到 2000 字符`);
+  }
 
   // 关键：避免「文笔好/正式文体」被误判为AI的核心信号是AI模板词密度
   const prompt = `你是AI文本检测专家。判断以下中文文章是否由AI生成，输出严格JSON。
@@ -184,14 +189,25 @@ ${truncatedText}`;
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
+    // 某些模型（如 DeepSeek 推理模型）会把回答放到 reasoning_content 字段
+    let content = data.choices?.[0]?.message?.content || '';
+    const reasoningContent = data.choices?.[0]?.message?.reasoning_content || '';
+    
+    // 如果 content 为空但 reasoning_content 有内容，使用 reasoning_content
+    if (!content && reasoningContent) {
+      console.log(`[Prompt检测] 模型 ${modelId} content 为空，使用 reasoning_content`);
+      content = reasoningContent;
+    }
     
     // 打印完整响应用于调试
     if (!content) {
       console.error(`[Prompt检测] 模型 ${modelId} 返回空内容，完整响应:`, JSON.stringify(data).substring(0, 500));
-    } else {
-      console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
+      // 空内容降级到本地
+      const result = detectLocal(text);
+      return { aiProbability: result.aiProbability, reason: '模型返回空内容', signals: [], degraded: true };
     }
+    
+    console.log(`[Prompt检测] 模型 ${modelId} 返回: ${content.substring(0, 200)}`);
 
     const parsed = parseModelJson(content);
     if (parsed === null) {
@@ -385,11 +401,28 @@ async function callBatchParagraphModel(
   const prompt = `你是AI文本检测专家。下面有 ${chunks.length} 个文本片段，逐个判断是否AI生成。输出严格JSON数组。
 
 【核心原则】
-1. 文笔好≠AI生成。仅"AI模板词高频 + 句式套路化"才是高分信号。
-2. 自然连接词（所以/因此/但是/因为）不计入AI特征。
-3. 个人事例、口语化、感叹号、不规整句式 → 倾向低分。
+1. 文笔好≠AI生成。人类优秀文章也可能结构严谨、用词规范。不要因为这些就判高分。
+2. 唯一可靠的高分信号是"AI模板词"高频出现 + 句式高度套路化。仅在确凿证据下才给高分（>60）。
+3. 出现以下任何一种"人类痕迹"，倾向判低分（<40）：
+   - 个人经历 / 具体事例 / 具体地名 / 具体人物 / 具体时间
+   - 主观情感 / 口语化表达 / 方言 / 俚语 / 自嘲
+   - 句式不规整（短句、断句、倒装、反问、感叹句）
+   - 感叹号、省略号、破折号等情感标点
 
-【AI模板词】首先/其次/最后/综上所述/由此可见/值得注意的是/不仅...而且/一方面...另一方面 等。
+【AI模板词清单（强信号）】
+- 列举式：首先 / 其次 / 再次 / 然后 / 接着 / 最后
+- 总结式：综上所述 / 由此可见 / 总而言之 / 总的来说 / 综上
+- 转折套路：值得注意的是 / 需要指出的是 / 值得一提的是 / 不可否认
+- 对比式：不仅...而且 / 一方面...另一方面 / 既...又
+
+【自然连接词不算AI信号】所以、因此、由于、因为、但是、然而、不过、同时、开始、负责、能够、通过、进行——这些是中文正常词汇，不能仅凭它们判高分。
+
+【评分尺度】
+- 0-20：明显人类（口语化、有具体事例/情感）
+- 20-40：可能人类（有人类痕迹但文笔不错）
+- 40-60：模糊（无明显AI模板词，也无明显人类痕迹）
+- 60-80：偏AI（出现AI模板词但混入部分人类风格）
+- 80-100：高AI（大量AI模板词 + 句式极度规整）
 
 【输出格式】严格JSON数组，每个元素对应一个片段，index 必须与输入一致。不要输出任何其他文字、不要markdown代码块：
 [
@@ -439,7 +472,15 @@ ${fragments}`;
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
+    // 某些模型（如 DeepSeek 推理模型）会把回答放到 reasoning_content 字段
+    let content = data.choices?.[0]?.message?.content || '';
+    const reasoningContent = data.choices?.[0]?.message?.reasoning_content || '';
+    
+    // 如果 content 为空但 reasoning_content 有内容，使用 reasoning_content
+    if (!content && reasoningContent) {
+      console.log(`[段落检测] 模型 ${modelId} content 为空，使用 reasoning_content`);
+      content = reasoningContent;
+    }
     
     // 打印完整响应用于调试
     if (!content) {
